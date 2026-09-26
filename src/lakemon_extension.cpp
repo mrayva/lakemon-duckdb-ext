@@ -2,6 +2,7 @@
 
 #include "lakemon_extension.hpp"
 #include "lakemon_catalog.hpp"
+#include "lakemon_compat.hpp"
 #include "lakemon_maintain.hpp"
 #include "lakemon_policy.hpp"
 
@@ -47,11 +48,11 @@ static void EmitRows(ClientContext &, TableFunctionInput &input, DataChunk &outp
 	while (state.offset < state.rows.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &row = state.rows[state.offset++];
 		for (idx_t col = 0; col < row.size(); col++) {
-			output.SetValue(col, count, row[col]);
+			lakemon::WriteChunkValue(output, col, count, row[col]);
 		}
 		count++;
 	}
-	output.SetCardinality(count);
+	lakemon::FinishChunk(output, count);
 }
 
 static void ParseNamedMaintain(TableFunctionBindInput &input, lakemon::MaintainOptions &options) {
@@ -73,7 +74,7 @@ static void ParseNamedMaintain(TableFunctionBindInput &input, lakemon::MaintainO
 }
 
 static unique_ptr<FunctionData> MaintainBind(ClientContext &, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
 	auto data = make_uniq<MaintainBindData>();
 	data->options.catalog = StringValue::Get(input.inputs[0]);
 	if (input.inputs.size() >= 2) {
@@ -100,7 +101,7 @@ static unique_ptr<GlobalTableFunctionState> MaintainInit(ClientContext &context,
 }
 
 static unique_ptr<FunctionData> StatsBind(ClientContext &, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
 	auto data = make_uniq<StatsBindData>();
 	data->catalog = StringValue::Get(input.inputs[0]);
 	if (input.inputs.size() >= 2) {
@@ -141,7 +142,7 @@ static unique_ptr<GlobalTableFunctionState> StatsInit(ClientContext &context, Ta
 }
 
 static unique_ptr<FunctionData> PolicyBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
-                                           vector<string> &names) {
+                                           lakemon::ColumnNameList &names) {
 	names = {"kind", "name", "min_value", "max_value", "threshold_or_target", "notes"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
@@ -168,7 +169,7 @@ static unique_ptr<GlobalTableFunctionState> PolicyInit(ClientContext &, TableFun
 }
 
 static void VersionFun(DataChunk &, ExpressionState &, Vector &result) {
-	result.Reference(Value("0.1.0"));
+	lakemon::ReferenceScalar(result, Value("0.1.0"));
 }
 
 static void AddNamedMaintainParams(TableFunction &function) {

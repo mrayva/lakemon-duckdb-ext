@@ -1,10 +1,6 @@
 #pragma once
 
-#include "duckdb.hpp"
-#include "duckdb/common/exception.hpp"
-#include "duckdb/main/client_context.hpp"
-#include "duckdb/main/connection.hpp"
-#include "duckdb/main/database.hpp"
+#include "lakemon_compat.hpp"
 
 #include <string>
 
@@ -41,8 +37,11 @@ inline std::string MetadataCatalog(const std::string &catalog) {
 }
 
 struct TableRef {
-	std::string schema = "main";
+	std::string schema;
 	std::string table;
+
+	TableRef() : schema("main") {
+	}
 };
 
 inline TableRef ParseTableRef(const std::string &raw) {
@@ -50,7 +49,7 @@ inline TableRef ParseTableRef(const std::string &raw) {
 	if (raw.empty()) {
 		return ref;
 	}
-	const auto dot = raw.find('.');
+	const std::string::size_type dot = raw.find('.');
 	if (dot == std::string::npos) {
 		ref.table = raw;
 		return ref;
@@ -58,16 +57,6 @@ inline TableRef ParseTableRef(const std::string &raw) {
 	ref.schema = raw.substr(0, dot);
 	ref.table = raw.substr(dot + 1);
 	return ref;
-}
-
-inline duckdb::unique_ptr<duckdb::MaterializedQueryResult> RunSQL(duckdb::ClientContext &context,
-                                                                    const std::string &sql) {
-	duckdb::Connection con(*context.db);
-	auto result = con.Query(sql);
-	if (result->HasError()) {
-		throw duckdb::InvalidInputException("lakemon: %s", result->GetError());
-	}
-	return result;
 }
 
 } // namespace lakemon

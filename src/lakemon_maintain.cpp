@@ -78,9 +78,8 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 		std::ostringstream sql;
 		sql << "CALL ducklake_flush_inlined_data(" << QuoteString(options.catalog) << TableArg(options.table)
 		    << SchemaNamed(options.table) << ")";
-		AppendCall(rows, context, options, "flush_inlined", options.table.schema, options.table.table,
-		           "ducklake_flush_inlined_data", sql.str(), options.table.schema, options.table.table,
-		           "flush inlined rows before rewrite/merge");
+		AppendCall(rows, context, options, "flush_inlined", "ducklake_flush_inlined_data", sql.str(),
+		           options.table.schema, options.table.table, "flush inlined rows before rewrite/merge");
 	}
 
 	for (const auto &hint : hints) {
