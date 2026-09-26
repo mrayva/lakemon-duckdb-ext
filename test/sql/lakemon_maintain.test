@@ -1,0 +1,27 @@
+# name: test/sql/lakemon_maintain.test
+# description: bind/error smoke for maintain and table stats
+# group: [sql]
+
+require lakemon
+
+# Missing DuckLake catalog: inventory fails closed with a clear error.
+statement error
+CALL lakemon_maintain('no_such_lake');
+----
+lakemon:
+
+statement error
+CALL lakemon_table_stats('no_such_lake');
+----
+lakemon:
+
+# Named knobs bind even when the catalog is absent (failure is inventory, not bind).
+statement error
+CALL lakemon_maintain('no_such_lake', dry_run => true, skip_expire => true, skip_cleanup => true);
+----
+lakemon:
+
+statement error
+CALL lakemon_maintain('no_such_lake', 'main.events', max_compacted_files => 4, expire_older_than => '7 days');
+----
+lakemon:
