@@ -1,0 +1,55 @@
+# name: test/sql/lakemon.test
+# description: smoke tests for the lakemon extension
+# group: [sql]
+
+statement error
+SELECT lakemon_version();
+----
+Catalog Error: Scalar Function with name lakemon_version does not exist!
+
+require lakemon
+
+query I
+SELECT lakemon_version();
+----
+0.1.0
+
+query I
+SELECT count(*) FROM lakemon_policy();
+----
+7
+
+query I
+SELECT count(*) FROM lakemon_policy() WHERE kind = 'rewrite_rung';
+----
+4
+
+query I
+SELECT count(*) FROM lakemon_policy() WHERE kind = 'merge_tier';
+----
+3
+
+query I
+SELECT name FROM lakemon_policy() WHERE kind = 'rewrite_rung' ORDER BY name;
+----
+cool
+default
+hot
+warm
+
+query I
+SELECT name FROM lakemon_policy() WHERE kind = 'merge_tier' ORDER BY name;
+----
+medium
+micro
+small
+
+query I
+SELECT threshold_or_target FROM lakemon_policy() WHERE kind = 'rewrite_rung' AND name = 'hot';
+----
+0.15
+
+query I
+SELECT threshold_or_target FROM lakemon_policy() WHERE kind = 'merge_tier' AND name = 'micro';
+----
+5MB

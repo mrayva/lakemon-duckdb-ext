@@ -1,0 +1,13 @@
+build
+.idea
+cmake-build-debug
+duckdb_unittest_tempdir/
+.DS_Store
+testext
+test/python/__pycache__/
+.Rhistory
+test/policy/test_policy
+test/policy/test_policy.exe
+test/policy/test_options
+test/policy/test_options.exe
+
