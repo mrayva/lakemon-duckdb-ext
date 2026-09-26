@@ -39,6 +39,8 @@ CALL lakemon_table_stats('no_such_lake');
 lakemon:
 
 # Empty catalog is a bind error, not process death.
+# Live option honor (rewrite_delete_threshold / target_file_size / expire_older_than /
+# delete_older_than / auto_compact) needs an attached DuckLake; see README Tests.
 statement error
 CALL lakemon_maintain('');
 ----

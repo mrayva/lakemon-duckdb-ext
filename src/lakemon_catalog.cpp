@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 
+#include <exception>
 #include <map>
 #include <sstream>
 
@@ -155,6 +156,73 @@ std::vector<policy::FileStat> InventoryFiles(duckdb::ClientContext &context, con
 	}
 }
 
+static bool TryParseOptionRows(QueryHandle &result, std::vector<policy::OptionBinding> &rows) {
+	const auto n = result.RowCount();
+	for (duckdb::idx_t i = 0; i < n; i++) {
+		policy::OptionBinding row;
+		row.name = CellString(result, 0, i);
+		row.value = CellString(result, 1, i);
+		row.scope = CellString(result, 2, i);
+		row.scope_entry = CellString(result, 3, i);
+		if (row.name.empty()) {
+			continue;
+		}
+		rows.push_back(std::move(row));
+	}
+	return true;
+}
+
+static bool TryLoadOptionsQuery(duckdb::ClientContext &context, const std::string &sql,
+                                std::vector<policy::OptionBinding> &rows, std::string &error) {
+	try {
+		auto result = RunSQL(context, sql);
+		if (!result) {
+			error = "lakemon: options query returned no result";
+			return false;
+		}
+		rows.clear();
+		TryParseOptionRows(*result, rows);
+		error.clear();
+		return true;
+	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const duckdb::Exception &ex) {
+		error = SafeWhat(ex);
+		return false;
+	} catch (const std::exception &ex) {
+		error = SafeWhat(ex);
+		return false;
+	}
+}
+
+std::vector<policy::OptionBinding> LoadCatalogOptions(duckdb::ClientContext &context, const std::string &catalog,
+                                                      std::string *error_out) {
+	std::vector<policy::OptionBinding> rows;
+	if (catalog.empty()) {
+		if (error_out) {
+			*error_out = "lakemon: catalog name is required";
+		}
+		return rows;
+	}
+	std::string error;
+	const std::string ident = QuoteIdent(catalog);
+	const std::string quoted = QuoteString(catalog);
+	const std::string select =
+	    "SELECT option_name, value, scope, scope_entry FROM ";
+	if (TryLoadOptionsQuery(context, select + "ducklake_options(" + quoted + ")", rows, error) ||
+	    TryLoadOptionsQuery(context, select + ident + ".options()", rows, error) ||
+	    TryLoadOptionsQuery(context, select + ident + ".main.options()", rows, error)) {
+		if (error_out) {
+			error_out->clear();
+		}
+		return rows;
+	}
+	if (error_out) {
+		*error_out = error.empty() ? "lakemon: could not read DuckLake options" : error;
+	}
+	return rows;
+}
+
 std::vector<policy::TableHint> InventoryTables(duckdb::ClientContext &context, const std::string &catalog,
                                                const TableRef &filter) {
 	auto files = InventoryFiles(context, catalog, filter);
@@ -162,10 +230,15 @@ std::vector<policy::TableHint> InventoryTables(duckdb::ClientContext &context, c
 	for (auto &file : files) {
 		grouped[{file.schema_name, file.table_name}].push_back(std::move(file));
 	}
+	std::string options_error;
+	const std::vector<policy::OptionBinding> options = LoadCatalogOptions(context, catalog, &options_error);
 	std::vector<policy::TableHint> hints;
 	for (auto &entry : grouped) {
-		hints.push_back(policy::SummarizeTable(entry.second));
+		policy::TableHint hint = policy::SummarizeTable(entry.second);
+		policy::ApplyNativeOptions(hint, options);
+		hints.push_back(std::move(hint));
 	}
+	(void)options_error;
 	return hints;
 }
 

@@ -76,9 +76,12 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	std::vector<MaintainRow> rows;
 	std::vector<policy::FileStat> files;
 	std::vector<policy::TableHint> hints;
+	std::string options_error;
+	std::vector<policy::OptionBinding> catalog_options;
 	try {
 		files = InventoryFiles(context, options.catalog, options.table);
 		hints = InventoryTables(context, options.catalog, options.table);
+		catalog_options = LoadCatalogOptions(context, options.catalog, &options_error);
 	} catch (const duckdb::InterruptException &) {
 		throw;
 	} catch (const Exception &ex) {
@@ -100,6 +103,17 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 
 	rows.push_back(MakeRow("inventory", "", "", "catalog_select", "ok", static_cast<int64_t>(files.size()),
 	                       static_cast<int64_t>(hints.size()), "byte_weighted rewrite ladder + merge size bands"));
+	if (!options_error.empty()) {
+		rows.push_back(MakeRow("catalog_options", "", "", "ducklake_options", "error", 0, 0, options_error));
+	}
+
+	const bool catalog_wide = options.table.table.empty();
+	const std::string expire_interval = policy::EffectiveInterval(
+	    options.expire_older_than_set, options.expire_older_than,
+	    policy::ResolveOption(catalog_options, "expire_older_than", "", ""));
+	const std::string delete_interval = policy::EffectiveInterval(
+	    options.delete_older_than_set, options.delete_older_than,
+	    policy::ResolveOption(catalog_options, "delete_older_than", "", ""));
 
 	{
 		std::ostringstream sql;
@@ -116,6 +130,12 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 		std::ostringstream details;
 		details << "rung=" << hint.rewrite_rung << " threshold=" << hint.rewrite_threshold
 		        << " deleted_bytes=" << hint.deleted_bytes_weighted;
+		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
+			details << " auto_compact=false";
+			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
+			                       static_cast<int64_t>(hint.file_count), 0, details.str()));
+			continue;
+		}
 		if (hint.rewrite_rung == "none" || hint.deleted_bytes_weighted == 0) {
 			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
 			                       static_cast<int64_t>(hint.file_count), 0, details.str()));
@@ -138,6 +158,11 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 				table_files.push_back(file);
 			}
 		}
+		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
+			rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name, "auto_compact", "skip",
+			                       static_cast<int64_t>(hint.file_count), 0, "auto_compact=false"));
+			continue;
+		}
 		for (const auto &tier : policy::DefaultMergeTiers()) {
 			uint64_t candidates = 0;
 			for (const auto &file : table_files) {
@@ -152,25 +177,31 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			}
 			const int64_t cap =
 			    options.max_compacted_files > 0 ? options.max_compacted_files : static_cast<int64_t>(tier.max_compacted_files);
-			std::ostringstream sql;
-			sql << "CALL ducklake_set_option(" << QuoteString(options.catalog) << ", 'target_file_size', "
-			    << QuoteString(tier.target_file_size) << ")";
-			if (options.dry_run) {
-				rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name, std::string("set_target_") + tier.name,
-				                       "planned", 0, 0, sql.str()));
-			} else {
-				try {
-					RunSQL(context, sql.str());
-				} catch (const duckdb::InterruptException &) {
-					throw;
-				} catch (const Exception &ex) {
+			const std::string target = policy::EffectiveTargetFileSize(
+			    policy::ResolveOption(catalog_options, "target_file_size", hint.schema_name, hint.table_name),
+			    tier.target_file_size);
+			const bool catalog_target = !hint.target_file_size.empty();
+			if (!catalog_target) {
+				std::ostringstream sql;
+				sql << "CALL ducklake_set_option(" << QuoteString(options.catalog) << ", 'target_file_size', "
+				    << QuoteString(target) << ")";
+				if (options.dry_run) {
 					rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name,
-					                       std::string("set_target_") + tier.name, "error", 0, 0, SafeWhat(ex)));
-					continue;
-				} catch (const std::exception &ex) {
-					rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name,
-					                       std::string("set_target_") + tier.name, "error", 0, 0, SafeWhat(ex)));
-					continue;
+					                       std::string("set_target_") + tier.name, "planned", 0, 0, sql.str()));
+				} else {
+					try {
+						RunSQL(context, sql.str());
+					} catch (const duckdb::InterruptException &) {
+						throw;
+					} catch (const Exception &ex) {
+						rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name,
+						                       std::string("set_target_") + tier.name, "error", 0, 0, SafeWhat(ex)));
+						continue;
+					} catch (const std::exception &ex) {
+						rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name,
+						                       std::string("set_target_") + tier.name, "error", 0, 0, SafeWhat(ex)));
+						continue;
+					}
 				}
 			}
 			std::ostringstream merge_sql;
@@ -180,16 +211,16 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			AppendCall(rows, context, options, "merge", std::string("tier_") + tier.name, merge_sql.str(),
 			           hint.schema_name, hint.table_name,
 			           std::string("band ") + std::to_string(tier.min_file_size) + "-" +
-			               std::to_string(tier.max_file_size) + " -> " + tier.target_file_size);
+			               std::to_string(tier.max_file_size) + " -> " + target);
 		}
 	}
 
-	if (!options.skip_expire && !options.expire_older_than.empty()) {
+	if (!options.skip_expire && !expire_interval.empty()) {
 		std::ostringstream sql;
 		sql << "CALL ducklake_expire_snapshots(" << QuoteString(options.catalog) << ", older_than => now() - INTERVAL "
-		    << QuoteString(options.expire_older_than) << ")";
+		    << QuoteString(expire_interval) << ")";
 		AppendCall(rows, context, options, "expire_snapshots", "expire", sql.str(), "", "",
-		           "older_than=" + options.expire_older_than);
+		           "older_than=" + expire_interval);
 	} else {
 		rows.push_back(MakeRow("expire_snapshots", "", "", "expire", "skip", 0, 0,
 		                       options.skip_expire ? "skip_expire" : "expire_older_than not set"));
@@ -198,14 +229,14 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	if (!options.skip_cleanup) {
 		std::ostringstream sql;
 		sql << "CALL ducklake_cleanup_old_files(" << QuoteString(options.catalog);
-		if (!options.delete_older_than.empty()) {
-			sql << ", older_than => now() - INTERVAL " << QuoteString(options.delete_older_than);
+		if (!delete_interval.empty()) {
+			sql << ", older_than => now() - INTERVAL " << QuoteString(delete_interval);
 		} else {
 			sql << ", cleanup_all => true";
 		}
 		sql << ")";
 		AppendCall(rows, context, options, "cleanup_old_files", "cleanup", sql.str(), "", "",
-		           options.delete_older_than.empty() ? "cleanup_all" : "older_than=" + options.delete_older_than);
+		           delete_interval.empty() ? "cleanup_all" : "older_than=" + delete_interval);
 
 		std::ostringstream orphan;
 		orphan << "CALL ducklake_delete_orphaned_files(" << QuoteString(options.catalog) << ")";

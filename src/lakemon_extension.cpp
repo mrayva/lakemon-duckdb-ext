@@ -88,8 +88,10 @@ static void ParseNamedMaintain(TableFunctionBindInput &input, lakemon::MaintainO
 			options.skip_cleanup = BooleanValue::Get(entry.second);
 		} else if (entry.first == "expire_older_than") {
 			options.expire_older_than = StringValue::Get(entry.second);
+			options.expire_older_than_set = true;
 		} else if (entry.first == "delete_older_than") {
 			options.delete_older_than = StringValue::Get(entry.second);
+			options.delete_older_than_set = true;
 		} else if (entry.first == "max_compacted_files") {
 			options.max_compacted_files = entry.second.GetValue<int64_t>();
 		}
@@ -168,10 +170,13 @@ static unique_ptr<FunctionData> StatsBind(ClientContext &, TableFunctionBindInpu
 	         "delete_ratio",
 	         "rewrite_rung",
 	         "rewrite_threshold",
-	         "merge_tier_hint"};
+	         "merge_tier_hint",
+	         "target_file_size",
+	         "auto_compact"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT,
 	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::BIGINT, LogicalType::BIGINT,
-	                LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::VARCHAR};
+	                LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::VARCHAR,
+	                LogicalType::VARCHAR, LogicalType::BOOLEAN};
 	return std::move(data);
 }
 
@@ -195,7 +200,8 @@ static unique_ptr<GlobalTableFunctionState> StatsInit(ClientContext &context, Ta
 		                       Value::BIGINT(static_cast<int64_t>(hint.delete_file_size_bytes)),
 		                       Value::BIGINT(static_cast<int64_t>(hint.delete_count)),
 		                       Value::BIGINT(static_cast<int64_t>(hint.deleted_bytes_weighted)), Value(hint.delete_ratio),
-		                       Value(hint.rewrite_rung), Value(hint.rewrite_threshold), Value(hint.merge_tier_hint)});
+		                       Value(hint.rewrite_rung), Value(hint.rewrite_threshold), Value(hint.merge_tier_hint),
+		                       Value(hint.target_file_size), Value::BOOLEAN(hint.auto_compact)});
 	}
 	return std::move(state);
 }

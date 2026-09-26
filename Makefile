@@ -10,3 +10,6 @@ policy-test:
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -I$(PROJ_DIR)src/include \
 		-o $(PROJ_DIR)test/policy/test_policy $(PROJ_DIR)test/policy/test_policy.cpp
 	$(PROJ_DIR)test/policy/test_policy
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -I$(PROJ_DIR)src/include \
+		-o $(PROJ_DIR)test/policy/test_options $(PROJ_DIR)test/policy/test_options.cpp
+	$(PROJ_DIR)test/policy/test_options

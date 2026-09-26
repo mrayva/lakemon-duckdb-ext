@@ -16,6 +16,8 @@ struct MaintainOptions {
 	bool skip_cleanup = false;
 	std::string expire_older_than;
 	std::string delete_older_than;
+	bool expire_older_than_set = false;
+	bool delete_older_than_set = false;
 	int64_t max_compacted_files = 0;
 };
 

@@ -2,6 +2,8 @@
 // Header-only so the rewrite ladder and merge tiers can be tested without DuckDB.
 #pragma once
 
+#include "lakemon_options.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -145,7 +147,23 @@ struct TableHint {
 	double rewrite_threshold = 0.95;
 	std::string rewrite_rung = "none";
 	std::string merge_tier_hint = "none";
+	std::string target_file_size;
+	bool auto_compact = true;
 };
+
+// Overlay native DuckLake options (table → schema → global) on a table hint.
+// Ladder rung is unchanged; rewrite_threshold becomes the effective CALL value.
+inline void ApplyNativeOptions(TableHint &hint, const std::vector<OptionBinding> &options) {
+	const ResolvedOption rewrite =
+	    ResolveOption(options, "rewrite_delete_threshold", hint.schema_name, hint.table_name);
+	hint.rewrite_threshold = EffectiveRewriteThreshold(hint.rewrite_threshold, rewrite);
+	const ResolvedOption compact = ResolveOption(options, "auto_compact", hint.schema_name, hint.table_name);
+	hint.auto_compact = EffectiveAutoCompact(compact);
+	const ResolvedOption target = ResolveOption(options, "target_file_size", hint.schema_name, hint.table_name);
+	if (target.found) {
+		hint.target_file_size = target.value;
+	}
+}
 
 inline TableHint SummarizeTable(const std::vector<FileStat> &files) {
 	TableHint hint;
