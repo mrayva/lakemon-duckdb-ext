@@ -44,18 +44,32 @@ static std::vector<policy::FileStat> InventoryFromMetadata(duckdb::ClientContext
 
 	auto result = RunSQL(context, sql.str());
 	std::vector<policy::FileStat> files;
+	if (!result) {
+		return files;
+	}
 	const auto n = result->RowCount();
 	for (duckdb::idx_t i = 0; i < n; i++) {
-		policy::FileStat file;
-		file.schema_name = result->GetValue(0, i).ToString();
-		file.table_name = result->GetValue(1, i).ToString();
-		file.data_file_id = static_cast<uint64_t>(result->GetValue(2, i).GetValue<int64_t>());
-		file.file_size_bytes = static_cast<uint64_t>(result->GetValue(3, i).GetValue<int64_t>());
-		file.record_count = static_cast<uint64_t>(result->GetValue(4, i).GetValue<int64_t>());
-		file.delete_count = static_cast<uint64_t>(result->GetValue(5, i).GetValue<int64_t>());
-		file.delete_file_size_bytes = static_cast<uint64_t>(result->GetValue(6, i).GetValue<int64_t>());
-		if (MatchesFilter(file, filter)) {
-			files.push_back(std::move(file));
+		try {
+			policy::FileStat file;
+			file.schema_name = CellString(*result, 0, i);
+			file.table_name = CellString(*result, 1, i);
+			if (file.table_name.empty()) {
+				continue;
+			}
+			file.data_file_id = static_cast<uint64_t>(CellInt64(*result, 2, i));
+			file.file_size_bytes = static_cast<uint64_t>(CellInt64(*result, 3, i));
+			file.record_count = static_cast<uint64_t>(CellInt64(*result, 4, i));
+			file.delete_count = static_cast<uint64_t>(CellInt64(*result, 5, i));
+			file.delete_file_size_bytes = static_cast<uint64_t>(CellInt64(*result, 6, i));
+			if (MatchesFilter(file, filter)) {
+				files.push_back(std::move(file));
+			}
+		} catch (const duckdb::InterruptException &) {
+			throw;
+		} catch (const duckdb::Exception &) {
+			continue;
+		} catch (const std::exception &) {
+			continue;
 		}
 	}
 	return files;
@@ -66,10 +80,13 @@ static std::vector<policy::FileStat> InventoryFromListFiles(duckdb::ClientContex
 	auto tables = RunSQL(context, "SELECT table_name, schema_id, table_id FROM ducklake_table_info(" +
 	                                  QuoteString(catalog) + ")");
 	std::vector<policy::FileStat> files;
+	if (!tables) {
+		return files;
+	}
 	const auto table_n = tables->RowCount();
 	for (duckdb::idx_t t = 0; t < table_n; t++) {
-		const auto table_name = tables->GetValue(0, t).ToString();
-		if (!filter.table.empty() && table_name != filter.table) {
+		const auto table_name = CellString(*tables, 0, t);
+		if (table_name.empty() || (!filter.table.empty() && table_name != filter.table)) {
 			continue;
 		}
 		std::ostringstream list_sql;
@@ -82,21 +99,26 @@ static std::vector<policy::FileStat> InventoryFromListFiles(duckdb::ClientContex
 		list_sql << ")";
 		try {
 			auto listed = RunSQL(context, list_sql.str());
+			if (!listed) {
+				continue;
+			}
 			const auto file_n = listed->RowCount();
 			for (duckdb::idx_t i = 0; i < file_n; i++) {
 				policy::FileStat file;
 				file.schema_name = filter.schema.empty() ? "main" : filter.schema;
 				file.table_name = table_name;
-				file.file_size_bytes =
-				    listed->GetValue(1, i).IsNull() ? 0 : static_cast<uint64_t>(listed->GetValue(1, i).GetValue<uint64_t>());
-				file.delete_file_size_bytes =
-				    listed->GetValue(3, i).IsNull() ? 0 : static_cast<uint64_t>(listed->GetValue(3, i).GetValue<uint64_t>());
+				file.file_size_bytes = static_cast<uint64_t>(CellInt64(*listed, 1, i));
+				file.delete_file_size_bytes = static_cast<uint64_t>(CellInt64(*listed, 3, i));
 				// list_files does not expose delete_count; treat any delete file as a rewrite candidate via bytes.
 				file.delete_count = file.delete_file_size_bytes > 0 ? 1 : 0;
 				file.record_count = 0;
 				files.push_back(std::move(file));
 			}
+		} catch (const duckdb::InterruptException &) {
+			throw;
 		} catch (const duckdb::Exception &) {
+			continue;
+		} catch (const std::exception &) {
 			continue;
 		}
 	}
@@ -105,16 +127,31 @@ static std::vector<policy::FileStat> InventoryFromListFiles(duckdb::ClientContex
 
 std::vector<policy::FileStat> InventoryFiles(duckdb::ClientContext &context, const std::string &catalog,
                                              const TableRef &filter) {
+	if (catalog.empty()) {
+		throw InvalidInputException("lakemon: catalog name is required");
+	}
 	try {
 		return InventoryFromMetadata(context, catalog, filter);
+	} catch (const duckdb::InterruptException &) {
+		throw;
 	} catch (const duckdb::Exception &) {
 		try {
 			return InventoryFromListFiles(context, catalog, filter);
+		} catch (const duckdb::InterruptException &) {
+			throw;
 		} catch (const duckdb::Exception &second) {
 			throw InvalidInputException(
 			    "lakemon: could not read DuckLake catalog %s (is ducklake loaded and the catalog attached?): %s",
-			    catalog, second.what());
+			    catalog, SafeWhat(second));
+		} catch (const std::exception &second) {
+			throw InvalidInputException(
+			    "lakemon: could not read DuckLake catalog %s (is ducklake loaded and the catalog attached?): %s",
+			    catalog, SafeWhat(second));
 		}
+	} catch (const std::exception &first) {
+		throw InvalidInputException(
+		    "lakemon: could not read DuckLake catalog %s (is ducklake loaded and the catalog attached?): %s", catalog,
+		    SafeWhat(first));
 	}
 }
 

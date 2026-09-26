@@ -90,9 +90,11 @@ Execution order:
 
 Result columns: `step`, `schema_name`, `table_name`, `action`, `status`, `files_processed`, `files_created`, `details`.
 
+Failed catalog inventory or a nested DuckLake `CALL` becomes `status = error` (`details` holds the message). The DuckDB session stays usable. Inventory failure stops the plan; later independent steps continue after a step error. Interrupt is not swallowed.
+
 ### `CALL lakemon_table_stats(catalog [, table])`
 
-One row per table: file counts and bytes, delete counts, **deleted_bytes_weighted**, delete ratio, selected `rewrite_rung` / `rewrite_threshold`, and `merge_tier_hint`.
+One row per table: file counts and bytes, delete counts, **deleted_bytes_weighted**, delete ratio, selected `rewrite_rung` / `rewrite_threshold`, and `merge_tier_hint`. A missing catalog or unloaded `ducklake` raises a DuckDB error (session stays usable). Empty metadata returns no rows.
 
 ### Rewrite ladder (byte-weighted)
 

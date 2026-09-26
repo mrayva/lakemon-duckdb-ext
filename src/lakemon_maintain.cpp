@@ -5,6 +5,7 @@
 
 #include "duckdb/common/exception.hpp"
 
+#include <exception>
 #include <sstream>
 
 namespace lakemon {
@@ -28,6 +29,9 @@ static MaintainRow MakeRow(const std::string &step, const std::string &schema, c
 
 static int64_t CountResultRows(duckdb::ClientContext &context, const std::string &sql) {
 	auto result = RunSQL(context, sql);
+	if (!result) {
+		return 0;
+	}
 	return static_cast<int64_t>(result->RowCount());
 }
 
@@ -55,16 +59,39 @@ static void AppendCall(std::vector<MaintainRow> &rows, duckdb::ClientContext &co
 	try {
 		const int64_t created = CountResultRows(context, sql);
 		rows.push_back(MakeRow(step, schema, table, action, "ok", 0, created, details));
+	} catch (const duckdb::InterruptException &) {
+		throw;
 	} catch (const Exception &ex) {
-		rows.push_back(MakeRow(step, schema, table, action, "error", 0, 0, ex.what()));
+		rows.push_back(MakeRow(step, schema, table, action, "error", 0, 0, SafeWhat(ex)));
+	} catch (const std::exception &ex) {
+		rows.push_back(MakeRow(step, schema, table, action, "error", 0, 0, SafeWhat(ex)));
 	}
 }
 
+// Inventory failure: one status=error row, then stop (do not CALL rewrite/merge
+// against an unread catalog). Nested DuckLake CALL failures: status=error for
+// that step, then continue later independent steps (rewrite / merge / expire /
+// cleanup). InterruptException is rethrown. The session stays usable.
 std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const MaintainOptions &options) {
 	std::vector<MaintainRow> rows;
-	auto files = InventoryFiles(context, options.catalog, options.table);
-	auto hints = InventoryTables(context, options.catalog, options.table);
+	std::vector<policy::FileStat> files;
+	std::vector<policy::TableHint> hints;
+	try {
+		files = InventoryFiles(context, options.catalog, options.table);
+		hints = InventoryTables(context, options.catalog, options.table);
+	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const Exception &ex) {
+		rows.push_back(MakeRow("inventory", options.table.schema, options.table.table, "catalog_select", "error", 0, 0,
+		                       SafeWhat(ex)));
+		return rows;
+	} catch (const std::exception &ex) {
+		rows.push_back(MakeRow("inventory", options.table.schema, options.table.table, "catalog_select", "error", 0, 0,
+		                       SafeWhat(ex)));
+		return rows;
+	}
 
+	try {
 	if (hints.empty()) {
 		rows.push_back(MakeRow("inventory", options.table.schema, options.table.table, "catalog_select", "skip", 0, 0,
 		                       "no DuckLake tables matched"));
@@ -134,9 +161,15 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			} else {
 				try {
 					RunSQL(context, sql.str());
+				} catch (const duckdb::InterruptException &) {
+					throw;
 				} catch (const Exception &ex) {
 					rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name,
-					                       std::string("set_target_") + tier.name, "error", 0, 0, ex.what()));
+					                       std::string("set_target_") + tier.name, "error", 0, 0, SafeWhat(ex)));
+					continue;
+				} catch (const std::exception &ex) {
+					rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name,
+					                       std::string("set_target_") + tier.name, "error", 0, 0, SafeWhat(ex)));
 					continue;
 				}
 			}
@@ -183,6 +216,17 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	}
 
 	return rows;
+	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const Exception &ex) {
+		rows.push_back(MakeRow("maintain", options.table.schema, options.table.table, "orchestrate", "error", 0, 0,
+		                       SafeWhat(ex)));
+		return rows;
+	} catch (const std::exception &ex) {
+		rows.push_back(MakeRow("maintain", options.table.schema, options.table.table, "orchestrate", "error", 0, 0,
+		                       SafeWhat(ex)));
+		return rows;
+	}
 }
 
 } // namespace lakemon

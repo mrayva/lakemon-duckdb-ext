@@ -4,24 +4,47 @@
 
 require lakemon
 
-# Missing DuckLake catalog: inventory fails closed with a clear error.
-statement error
-CALL lakemon_maintain('no_such_lake');
+# Missing DuckLake catalog: maintain emits an error row and keeps the session.
+query II
+SELECT step, status FROM lakemon_maintain('no_such_lake');
 ----
-lakemon:
+inventory	error
 
+query I
+SELECT count(*) FROM lakemon_maintain('no_such_lake') WHERE details LIKE '%lakemon:%';
+----
+1
+
+# Named knobs bind; failure is still an inventory error row, not a bind crash.
+query II
+SELECT step, status FROM lakemon_maintain('no_such_lake', dry_run => true, skip_expire => true, skip_cleanup => true);
+----
+inventory	error
+
+query II
+SELECT step, status FROM lakemon_maintain('no_such_lake', 'main.events', max_compacted_files => 4, expire_older_than => '7 days');
+----
+inventory	error
+
+# Session remains usable after the inventory error rows.
+query I
+SELECT lakemon_version();
+----
+0.1.0
+
+# table_stats uses the DuckDB error path (no status column).
 statement error
 CALL lakemon_table_stats('no_such_lake');
 ----
 lakemon:
 
-# Named knobs bind even when the catalog is absent (failure is inventory, not bind).
+# Empty catalog is a bind error, not process death.
 statement error
-CALL lakemon_maintain('no_such_lake', dry_run => true, skip_expire => true, skip_cleanup => true);
+CALL lakemon_maintain('');
 ----
 lakemon:
 
 statement error
-CALL lakemon_maintain('no_such_lake', 'main.events', max_compacted_files => 4, expire_older_than => '7 days');
+CALL lakemon_table_stats('');
 ----
 lakemon:

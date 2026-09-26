@@ -41,13 +41,73 @@ typedef duckdb::MaterializedQueryResult QueryHandle;
 typedef duckdb::vector<duckdb::string> ColumnNameList;
 #endif
 
+inline const char *SafeWhat(const std::exception &ex) {
+	const char *msg = ex.what();
+	return msg ? msg : "unknown error";
+}
+
+// Nested SQL on a fresh Connection so a failed DuckLake CALL does not poison
+// the ClientContext that is executing lakemon_*. Interrupt is rethrown.
 inline duckdb::unique_ptr<QueryHandle> RunSQL(duckdb::ClientContext &context, const std::string &sql) {
-	duckdb::Connection con(*context.db);
-	auto result = con.Query(sql);
-	if (result->HasError()) {
-		throw duckdb::InvalidInputException("lakemon: %s", result->GetError());
+	if (!context.db) {
+		throw duckdb::InvalidInputException("lakemon: database handle is not available");
 	}
-	return result;
+	try {
+		duckdb::Connection con(*context.db);
+		auto result = con.Query(sql);
+		if (!result) {
+			throw duckdb::InvalidInputException("lakemon: query returned no result");
+		}
+		if (result->HasError()) {
+			throw duckdb::InvalidInputException("lakemon: %s", result->GetError());
+		}
+		return result;
+	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const duckdb::Exception &) {
+		throw;
+	} catch (const std::exception &ex) {
+		throw duckdb::InvalidInputException("lakemon: %s", SafeWhat(ex));
+	}
+}
+
+inline duckdb::Value CellAt(QueryHandle &result, duckdb::idx_t col, duckdb::idx_t row) {
+	if (col >= result.ColumnCount()) {
+		return duckdb::Value();
+	}
+	try {
+		return result.GetValue(col, row);
+	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const duckdb::Exception &) {
+		return duckdb::Value();
+	} catch (const std::exception &) {
+		return duckdb::Value();
+	}
+}
+
+inline std::string CellString(QueryHandle &result, duckdb::idx_t col, duckdb::idx_t row) {
+	const duckdb::Value value = CellAt(result, col, row);
+	if (value.IsNull()) {
+		return std::string();
+	}
+	return value.ToString();
+}
+
+inline int64_t CellInt64(QueryHandle &result, duckdb::idx_t col, duckdb::idx_t row, int64_t fallback = 0) {
+	const duckdb::Value value = CellAt(result, col, row);
+	if (value.IsNull()) {
+		return fallback;
+	}
+	try {
+		return value.GetValue<int64_t>();
+	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const duckdb::Exception &) {
+		return fallback;
+	} catch (const std::exception &) {
+		return fallback;
+	}
 }
 
 inline void ReferenceScalar(duckdb::Vector &result, const duckdb::Value &value) {

@@ -15,8 +15,10 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 
+#include <exception>
 #include <iomanip>
 #include <sstream>
+#include <vector>
 
 namespace duckdb {
 
@@ -43,11 +45,18 @@ struct RowState : public GlobalTableFunctionState {
 };
 
 static void EmitRows(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+	if (!input.global_state) {
+		lakemon::FinishChunk(output, 0);
+		return;
+	}
 	auto &state = input.global_state->Cast<RowState>();
 	idx_t count = 0;
+	const idx_t out_cols = output.ColumnCount();
 	while (state.offset < state.rows.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &row = state.rows[state.offset++];
-		for (idx_t col = 0; col < row.size(); col++) {
+		const idx_t row_cols = static_cast<idx_t>(row.size());
+		const idx_t use_cols = row_cols < out_cols ? row_cols : out_cols;
+		for (idx_t col = 0; col < use_cols; col++) {
 			lakemon::WriteChunkValue(output, col, count, row[col]);
 		}
 		count++;
@@ -55,8 +64,22 @@ static void EmitRows(ClientContext &, TableFunctionInput &input, DataChunk &outp
 	lakemon::FinishChunk(output, count);
 }
 
+static string RequireCatalog(const Value &value) {
+	if (value.IsNull()) {
+		throw InvalidInputException("lakemon: catalog name is required");
+	}
+	const string catalog = StringValue::Get(value);
+	if (catalog.empty()) {
+		throw InvalidInputException("lakemon: catalog name is required");
+	}
+	return catalog;
+}
+
 static void ParseNamedMaintain(TableFunctionBindInput &input, lakemon::MaintainOptions &options) {
 	for (auto &entry : input.named_parameters) {
+		if (entry.second.IsNull()) {
+			throw InvalidInputException("lakemon: named parameter cannot be NULL");
+		}
 		if (entry.first == "dry_run") {
 			options.dry_run = BooleanValue::Get(entry.second);
 		} else if (entry.first == "skip_expire") {
@@ -76,11 +99,19 @@ static void ParseNamedMaintain(TableFunctionBindInput &input, lakemon::MaintainO
 static unique_ptr<FunctionData> MaintainBind(ClientContext &, TableFunctionBindInput &input,
                                              vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
 	auto data = make_uniq<MaintainBindData>();
-	data->options.catalog = StringValue::Get(input.inputs[0]);
-	if (input.inputs.size() >= 2) {
+	data->options.catalog = RequireCatalog(input.inputs[0]);
+	if (input.inputs.size() >= 2 && !input.inputs[1].IsNull()) {
 		data->options.table = lakemon::ParseTableRef(StringValue::Get(input.inputs[1]));
 	}
-	ParseNamedMaintain(input, data->options);
+	try {
+		ParseNamedMaintain(input, data->options);
+	} catch (const InterruptException &) {
+		throw;
+	} catch (const Exception &) {
+		throw;
+	} catch (const std::exception &ex) {
+		throw InvalidInputException("lakemon: %s", lakemon::SafeWhat(ex));
+	}
 
 	names = {"step", "schema_name", "table_name", "action", "status", "files_processed", "files_created", "details"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
@@ -91,7 +122,26 @@ static unique_ptr<FunctionData> MaintainBind(ClientContext &, TableFunctionBindI
 static unique_ptr<GlobalTableFunctionState> MaintainInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<MaintainBindData>();
 	auto state = make_uniq<RowState>();
-	auto rows = lakemon::RunMaintain(context, bind.options);
+	std::vector<lakemon::MaintainRow> rows;
+	try {
+		rows = lakemon::RunMaintain(context, bind.options);
+	} catch (const InterruptException &) {
+		throw;
+	} catch (const Exception &ex) {
+		lakemon::MaintainRow row;
+		row.step = "maintain";
+		row.action = "orchestrate";
+		row.status = "error";
+		row.details = lakemon::SafeWhat(ex);
+		rows.push_back(row);
+	} catch (const std::exception &ex) {
+		lakemon::MaintainRow row;
+		row.step = "maintain";
+		row.action = "orchestrate";
+		row.status = "error";
+		row.details = lakemon::SafeWhat(ex);
+		rows.push_back(row);
+	}
 	for (auto &row : rows) {
 		state->rows.push_back({Value(row.step), Value(row.schema_name), Value(row.table_name), Value(row.action),
 		                       Value(row.status), Value::BIGINT(row.files_processed), Value::BIGINT(row.files_created),
@@ -103,8 +153,8 @@ static unique_ptr<GlobalTableFunctionState> MaintainInit(ClientContext &context,
 static unique_ptr<FunctionData> StatsBind(ClientContext &, TableFunctionBindInput &input,
                                           vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
 	auto data = make_uniq<StatsBindData>();
-	data->catalog = StringValue::Get(input.inputs[0]);
-	if (input.inputs.size() >= 2) {
+	data->catalog = RequireCatalog(input.inputs[0]);
+	if (input.inputs.size() >= 2 && !input.inputs[1].IsNull()) {
 		data->table = lakemon::ParseTableRef(StringValue::Get(input.inputs[1]));
 	}
 	names = {"schema_name",
@@ -128,7 +178,16 @@ static unique_ptr<FunctionData> StatsBind(ClientContext &, TableFunctionBindInpu
 static unique_ptr<GlobalTableFunctionState> StatsInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<StatsBindData>();
 	auto state = make_uniq<RowState>();
-	auto hints = lakemon::InventoryTables(context, bind.catalog, bind.table);
+	std::vector<lakemon::policy::TableHint> hints;
+	try {
+		hints = lakemon::InventoryTables(context, bind.catalog, bind.table);
+	} catch (const InterruptException &) {
+		throw;
+	} catch (const Exception &) {
+		throw;
+	} catch (const std::exception &ex) {
+		throw InvalidInputException("lakemon: %s", lakemon::SafeWhat(ex));
+	}
 	for (auto &hint : hints) {
 		state->rows.push_back({Value(hint.schema_name), Value(hint.table_name), Value::BIGINT(static_cast<int64_t>(hint.file_count)),
 		                       Value::BIGINT(static_cast<int64_t>(hint.file_size_bytes)),
