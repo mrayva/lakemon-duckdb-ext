@@ -22,7 +22,7 @@ This repo already matches the template layout. `community/description.yml` is th
 ## Remaining steps
 
 1. Make `github.com/paulosuzart/lakemon-duckdb-ext` public when you are ready to list it.
-2. Confirm CI is green on the commit you want to publish (DuckDB 1.5 and 2.x jobs in `.github/workflows/MainDistributionPipeline.yml`).
+2. Confirm CI is green on the commit you want to publish: run **Actions → Main Extension Distribution Pipeline → Run workflow** (DuckDB 1.5 and 2.x). That workflow does not run on ordinary feature-branch pushes.
 3. Copy `community/description.yml` into a fork of [duckdb/community-extensions](https://github.com/duckdb/community-extensions) at:
 
    ```
