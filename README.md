@@ -151,7 +151,7 @@ The in-tree shell already loads `lakemon`.
 
 - `make policy-test` — rewrite-ladder / merge-tier math and DuckLake option precedence (no DuckDB, seconds)
 - `make test` — SQL smoke: `lakemon_version`, `lakemon_policy`, bind errors / maintain error rows when no catalog is attached
-- CI builds the loadable extension for **DuckDB 1.5.5** and **DuckDB 2.x** (`v2.0-cyanoptera`) via `duckdb/extension-ci-tools`
+- CI: `make policy-test` on every push/PR. Full DuckDB **1.5.5** and **2.x** (`v2.0-cyanoptera`) distribution builds run on `main`, `v*` tags, or **Actions → Main Extension Distribution Pipeline → Run workflow** (use that before a community listing submit).
 
 End-to-end rewrite/merge against a live DuckLake catalog is left to your own lake (CI does not attach a lake). Manual check: `ATTACH` a lake, `CALL lake.set_option(...)` for the five honored keys, then `CALL lakemon_table_stats` / `lakemon_maintain(..., dry_run => true)` and confirm effective threshold, target, expire/cleanup intervals, and `auto_compact` skips.
 

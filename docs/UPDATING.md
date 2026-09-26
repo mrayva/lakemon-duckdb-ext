@@ -8,6 +8,7 @@ This repository follows the C++ [extension-template](https://github.com/duckdb/e
    - `duckdb-stable-build` → latest 1.5.x tag
    - `duckdb-2-build` → `v2.0-cyanoptera` / `main` until 2.0.0 is tagged
 4. Rebuild and run `make test` plus `make policy-test`.
+5. Before merge or a community listing submit, run **Actions → Main Extension Distribution Pipeline → Run workflow** on the branch (that workflow does not run on ordinary feature-branch pushes).
 
 The C++ extension API is **not** a stable ABI. A DuckDB bump may require source changes. Useful references:
 

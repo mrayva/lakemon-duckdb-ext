@@ -1,13 +1,23 @@
+#
+# Cheap, no-DuckDB checks. This is the only workflow that runs on every
+# push and pull_request. Full DuckDB 1.5 / 2.x distribution builds live in
+# MainDistributionPipeline.yml (workflow_dispatch or push to main / version tags).
+#
 name: Policy tests
 on:
   push:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}
+  cancel-in-progress: true
+
 jobs:
   policy:
+    name: Policy tests (no DuckDB)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compile and run byte_weighted / merge-tier tests
+      - name: Compile and run policy tests
         run: make policy-test

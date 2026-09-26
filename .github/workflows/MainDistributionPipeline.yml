@@ -1,26 +1,25 @@
 #
-# Builds the extension against DuckDB 1.5 (stable) and 2.x (v2.0-cyanoptera).
-# Also runs the standalone policy tests that do not need DuckDB.
+# Expensive DuckDB 1.5 and 2.x multi-platform extension binaries.
+# Does not run on ordinary feature-branch pushes.
+#
+# Run the full matrix before a community listing submit or merge to main:
+#   GitHub → Actions → "Main Extension Distribution Pipeline" → Run workflow
+#   (select the branch). Also runs automatically on push to main and v* tags.
 #
 name: Main Extension Distribution Pipeline
 on:
-  push:
-  pull_request:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
-  policy-tests:
-    name: Policy tests (no DuckDB)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build and run policy tests
-        run: make policy-test
-
   duckdb-stable-build:
     name: Build extension binaries (DuckDB 1.5)
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.5
