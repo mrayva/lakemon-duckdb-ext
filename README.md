@@ -105,7 +105,7 @@ Failed catalog inventory or a nested DuckLake `CALL` becomes `status = error` (`
 
 ### `CALL lakemon_table_stats(catalog [, table])`
 
-One row per table: file counts and bytes, delete counts, **deleted_bytes_weighted**, delete ratio, selected `rewrite_rung`, **effective** `rewrite_threshold`, `merge_tier_hint`, `target_file_size`, and `auto_compact`. `lakemon_policy()` lists built-in ladder/band defaults; `lakemon_policy(catalog)` lists the effective policy after persisted overrides; stats then apply native DuckLake options. A missing catalog or unloaded `ducklake` raises a DuckDB error (session stays usable). Empty metadata returns no rows.
+One row per table: file counts and bytes, delete counts, **deleted_bytes_weighted**, delete ratio, selected `rewrite_rung`, **effective** `rewrite_threshold`, `merge_tier_hint`, `target_file_size`, and `auto_compact`. `lakemon_policy()` lists built-in ladder/band defaults; `lakemon_policy(catalog)` lists the effective policy after persisted overrides; stats then apply native DuckLake options. A missing catalog or unloaded `ducklake` raises a DuckDB error (session stays usable). Empty metadata returns no rows. Total unread metadata (no table could be read) also raises; the error includes every diagnostic. Maintain instead emits one inventory `error` row per diagnostic.
 
 ### `CALL lakemon_policy([catalog])`
 

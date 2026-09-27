@@ -6,7 +6,7 @@
 make policy-test
 ```
 
-Compiles `test/policy/test_policy.cpp`, `test_options.cpp`, and `test_overrides.cpp` against the header-only policy/options code (no DuckDB).
+Compiles `test/policy/test_policy.cpp`, `test_options.cpp`, and `test_overrides.cpp` against the header-only policy/options/diagnostics code (no DuckDB).
 
 ## Extension smoke
 

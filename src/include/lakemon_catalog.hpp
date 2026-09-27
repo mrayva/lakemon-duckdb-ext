@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "lakemon_diagnostics.hpp"
 #include "lakemon_policy.hpp"
 #include "lakemon_sql.hpp"
 
@@ -9,19 +10,14 @@
 
 namespace lakemon {
 
-// Per-table / per-row unread metadata. Maintain emits status=error; the session
-// stays usable. Interrupt and bad_alloc are never recorded here (they rethrow).
-struct InventoryDiagnostic {
-	std::string schema_name;
-	std::string table_name;
-	std::string source;
-	std::string message;
-};
-
 std::vector<policy::FileStat> InventoryFiles(duckdb::ClientContext &context, const std::string &catalog,
                                              const TableRef &filter,
                                              std::vector<InventoryDiagnostic> *diagnostics = nullptr);
 
+// When diagnostics is set (maintain), unread rows are appended and hints are
+// returned for tables that were read. When it is null (table_stats has no
+// status column), a total unread inventory raises with every diagnostic joined
+// so the failure is visible and not truncated to the first message.
 std::vector<policy::TableHint> InventoryTables(duckdb::ClientContext &context, const std::string &catalog,
                                                const TableRef &filter,
                                                std::vector<InventoryDiagnostic> *diagnostics = nullptr,

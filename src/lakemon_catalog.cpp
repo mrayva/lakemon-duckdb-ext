@@ -273,21 +273,21 @@ std::vector<policy::TableHint> InventoryTables(duckdb::ClientContext &context, c
 	for (auto &file : files) {
 		grouped[{file.schema_name, file.table_name}].push_back(std::move(file));
 	}
-	std::string options_error;
+	[[maybe_unused]] std::string options_error;
 	const std::vector<policy::OptionBinding> options = LoadCatalogOptions(context, catalog, &options_error);
-	std::string policy_error;
+	[[maybe_unused]] std::string policy_error;
 	const policy::ActivePolicy active = LoadActivePolicy(context, catalog, &policy_error);
-	(void)policy_error;
 	std::vector<policy::TableHint> hints;
 	for (auto &entry : grouped) {
 		policy::TableHint hint = policy::SummarizeTable(entry.second, active);
 		policy::ApplyNativeOptions(hint, options);
 		hints.push_back(std::move(hint));
 	}
-	(void)options_error;
 	// table_stats has no status column: total unread metadata must not look empty.
+	// Join every diagnostic (maintain already surfaces each one as a row).
 	if (!diagnostics && hints.empty() && !local_diagnostics.empty()) {
-		throw InvalidInputException("lakemon: unread DuckLake metadata: %s", local_diagnostics.front().message.c_str());
+		const std::string summary = FormatInventoryDiagnostics(local_diagnostics);
+		throw InvalidInputException("lakemon: unread DuckLake metadata: %s", summary.c_str());
 	}
 	return hints;
 }

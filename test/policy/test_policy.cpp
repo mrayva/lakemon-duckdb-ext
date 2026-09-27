@@ -1,4 +1,5 @@
 #include "expect.hpp"
+#include "lakemon_diagnostics.hpp"
 #include "lakemon_pipeline.hpp"
 #include "lakemon_policy.hpp"
 
@@ -122,6 +123,25 @@ static void TestPipelineDependsOnFlush() {
 	       "skip reason is explicit");
 }
 
+static void TestFormatInventoryDiagnosticsJoinsAll() {
+	lakemon::InventoryDiagnostic first;
+	first.schema_name = "main";
+	first.table_name = "events";
+	first.source = "metadata";
+	first.message = "missing delete_count";
+	lakemon::InventoryDiagnostic second;
+	second.schema_name = "sales";
+	second.table_name = "orders";
+	second.source = "list_files";
+	second.message = "lakemon: list_files returned no result";
+	const std::string joined = lakemon::FormatInventoryDiagnostics({first, second});
+	Expect(joined.find("main.events (metadata): missing delete_count") != std::string::npos,
+	       "first diagnostic is kept");
+	Expect(joined.find("sales.orders (list_files): lakemon: list_files returned no result") != std::string::npos,
+	       "second diagnostic is not truncated");
+	Expect(joined.find("; ") != std::string::npos, "multiple diagnostics are joined");
+}
+
 int main() {
 	TestDeletedBytesUsesCountNotEqualBuckets();
 	TestHotRungByDeleteCount();
@@ -132,6 +152,7 @@ int main() {
 	TestTableHintMerge();
 	TestOneFileDoesNotHintMerge();
 	TestPipelineDependsOnFlush();
+	TestFormatInventoryDiagnosticsJoinsAll();
 	if (TestFailures()) {
 		std::cerr << TestFailures() << " failure(s)" << std::endl;
 		return 1;

@@ -7,10 +7,24 @@
 #include <exception>
 #include <new>
 #include <sstream>
+#include <string_view>
 
 namespace lakemon {
 
 using duckdb::InvalidInputException;
+
+// Value columns after the catalog key in kTableSQL. SELECT and RowFromResult
+// share this order; do not reorder without updating CREATE TABLE.
+static const char *kPolicyValueCols[] = {"kind",
+                                         "name",
+                                         "min_delete_count",
+                                         "min_deleted_bytes",
+                                         "min_delete_ratio",
+                                         "rewrite_threshold",
+                                         "min_file_size",
+                                         "max_file_size",
+                                         "target_file_size",
+                                         "max_compacted_files"};
 
 static const char *kSchemaSQL = "CREATE SCHEMA IF NOT EXISTS __lakemon";
 static const char *kTableSQL =
@@ -28,6 +42,28 @@ static const char *kTableSQL =
     "max_compacted_files BIGINT, "
     "PRIMARY KEY (catalog, kind, name))";
 
+static std::string PolicySelectList() {
+	std::ostringstream sql;
+	const size_t n = sizeof(kPolicyValueCols) / sizeof(kPolicyValueCols[0]);
+	for (size_t i = 0; i < n; i++) {
+		if (i > 0) {
+			sql << ", ";
+		}
+		sql << kPolicyValueCols[i];
+	}
+	return sql.str();
+}
+
+static duckdb::idx_t PolicyCol(const char *name) {
+	const size_t n = sizeof(kPolicyValueCols) / sizeof(kPolicyValueCols[0]);
+	for (duckdb::idx_t i = 0; i < n; i++) {
+		if (std::string_view(kPolicyValueCols[i]) == name) {
+			return i;
+		}
+	}
+	return static_cast<duckdb::idx_t>(n);
+}
+
 void EnsurePolicyStore(duckdb::ClientContext &context) {
 	RunSQL(context, kSchemaSQL);
 	RunSQL(context, kTableSQL);
@@ -35,22 +71,22 @@ void EnsurePolicyStore(duckdb::ClientContext &context) {
 
 static policy::StoredPolicyRow RowFromResult(QueryHandle &result, duckdb::idx_t i) {
 	policy::StoredPolicyRow row;
-	row.kind = CellString(result, 0, i);
-	row.name = CellString(result, 1, i);
-	row.min_delete_count = static_cast<uint64_t>(CellInt64(result, 2, i));
-	row.min_deleted_bytes = static_cast<uint64_t>(CellInt64(result, 3, i));
-	const std::string ratio = CellString(result, 4, i);
+	row.kind = CellString(result, PolicyCol("kind"), i);
+	row.name = CellString(result, PolicyCol("name"), i);
+	row.min_delete_count = static_cast<uint64_t>(CellInt64(result, PolicyCol("min_delete_count"), i));
+	row.min_deleted_bytes = static_cast<uint64_t>(CellInt64(result, PolicyCol("min_deleted_bytes"), i));
+	const std::string ratio = CellString(result, PolicyCol("min_delete_ratio"), i);
 	if (!ratio.empty()) {
 		policy::TryParseDouble(ratio, row.min_delete_ratio);
 	}
-	const std::string threshold = CellString(result, 5, i);
+	const std::string threshold = CellString(result, PolicyCol("rewrite_threshold"), i);
 	if (!threshold.empty()) {
 		policy::TryParseDouble(threshold, row.rewrite_threshold);
 	}
-	row.min_file_size = static_cast<uint64_t>(CellInt64(result, 6, i));
-	row.max_file_size = static_cast<uint64_t>(CellInt64(result, 7, i));
-	row.target_file_size = CellString(result, 8, i);
-	row.max_compacted_files = static_cast<uint64_t>(CellInt64(result, 9, i));
+	row.min_file_size = static_cast<uint64_t>(CellInt64(result, PolicyCol("min_file_size"), i));
+	row.max_file_size = static_cast<uint64_t>(CellInt64(result, PolicyCol("max_file_size"), i));
+	row.target_file_size = CellString(result, PolicyCol("target_file_size"), i);
+	row.max_compacted_files = static_cast<uint64_t>(CellInt64(result, PolicyCol("max_compacted_files"), i));
 	return row;
 }
 
@@ -65,9 +101,7 @@ std::vector<policy::StoredPolicyRow> LoadStoredPolicyRows(duckdb::ClientContext 
 	}
 	try {
 		std::ostringstream sql;
-		sql << "SELECT kind, name, min_delete_count, min_deleted_bytes, min_delete_ratio, rewrite_threshold, "
-		       "min_file_size, max_file_size, target_file_size, max_compacted_files "
-		       "FROM __lakemon.policy WHERE catalog = "
+		sql << "SELECT " << PolicySelectList() << " FROM __lakemon.policy WHERE catalog = "
 		    << QuoteString(catalog);
 		auto result = RunSQL(context, sql.str());
 		if (!result) {
