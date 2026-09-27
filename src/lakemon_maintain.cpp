@@ -219,7 +219,7 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			    options.max_compacted_files > 0 ? options.max_compacted_files : static_cast<int64_t>(tier.max_compacted_files);
 			const std::string target = policy::EffectiveTargetFileSize(
 			    policy::ResolveOption(catalog_options, "target_file_size", hint.schema_name, hint.table_name),
-			    tier.target_file_size);
+			    tier.target_file_size.c_str());
 			const bool catalog_target = !hint.target_file_size.empty();
 			if (!catalog_target) {
 				std::ostringstream sql;

@@ -4,10 +4,10 @@
 
 #include "duckdb/common/exception.hpp"
 
+#include <cstring>
 #include <exception>
 #include <new>
 #include <sstream>
-#include <string_view>
 
 namespace lakemon {
 
@@ -57,7 +57,7 @@ static std::string PolicySelectList() {
 static duckdb::idx_t PolicyCol(const char *name) {
 	const size_t n = sizeof(kPolicyValueCols) / sizeof(kPolicyValueCols[0]);
 	for (duckdb::idx_t i = 0; i < n; i++) {
-		if (std::string_view(kPolicyValueCols[i]) == name) {
+		if (std::strcmp(kPolicyValueCols[i], name) == 0) {
 			return i;
 		}
 	}
