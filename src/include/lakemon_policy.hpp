@@ -45,6 +45,14 @@ struct DeleteCountLadder {
 
 enum class DeleteBand { High = 0, Medium = 1, Low = 2 };
 
+static_assert(static_cast<int>(DeleteBand::High) == 0, "groups[0] is High");
+static_assert(static_cast<int>(DeleteBand::Medium) == 1, "groups[1] is Medium");
+static_assert(static_cast<int>(DeleteBand::Low) == 2, "groups[2] is Low");
+
+inline int DeleteBandIndex(DeleteBand band) {
+	return static_cast<int>(band);
+}
+
 struct MergeTier {
 	std::string name;
 	uint64_t min_file_size;
@@ -569,7 +577,7 @@ inline std::vector<PlannedRewriteStep> PlanRewriteRungs(const std::vector<FileSt
 	for (const auto &file : files) {
 		DeleteBand band;
 		if (AssignDeleteBand(file.delete_count, ladder, band)) {
-			groups[static_cast<int>(band)].push_back(file);
+			groups[DeleteBandIndex(band)].push_back(file);
 		}
 	}
 	const DeleteBand order[3] = {DeleteBand::High, DeleteBand::Medium, DeleteBand::Low};
@@ -685,8 +693,11 @@ inline void RefreshRewritePlan(TableHint &hint) {
 }
 
 // Overlay native DuckLake options (table → schema → global) on a table hint.
-// rewrite_delete_threshold, when set, collapses planned rungs to one CALL with
-// that operator-configured value. auto_compact is honored by maintain.
+// rewrite_delete_threshold, when set, is a full CALL-count override: already
+// planned rungs collapse to one CALL with that catalog value. max_rewrite_steps
+// and per-rung byte_budget have already been applied while planning; collapse
+// does not bring back dropped rungs or files below low_min. auto_compact is
+// honored by maintain.
 inline void ApplyNativeOptions(TableHint &hint, const std::vector<OptionBinding> &options) {
 	const ResolvedOption rewrite =
 	    ResolveOption(options, "rewrite_delete_threshold", hint.schema_name, hint.table_name);

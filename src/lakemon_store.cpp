@@ -9,41 +9,33 @@
 #include <exception>
 #include <new>
 #include <sstream>
+#include <string>
 
 namespace lakemon {
 
 using duckdb::InvalidInputException;
 
-// Value columns after the catalog key in kTableSQL. SELECT and RowFromResult
-// share this order; do not reorder without updating CREATE TABLE.
-static const char *kPolicyValueCols[] = {"kind",
-                                         "name",
-                                         "min_file_size",
-                                         "max_file_size",
-                                         "target_file_size",
-                                         "max_compacted_files",
-                                         "high_min",
-                                         "medium_min",
-                                         "low_min",
-                                         "byte_budget",
-                                         "max_rewrite_steps"};
+// Value columns after catalog. CREATE / SELECT / UPSERT all walk this table.
+struct PolicyColumn {
+	const char *name;
+	const char *ddl_type;
+};
+
+static const PolicyColumn kPolicyValueCols[] = {{"kind", "VARCHAR NOT NULL"},
+                                                {"name", "VARCHAR NOT NULL"},
+                                                {"min_file_size", "BIGINT"},
+                                                {"max_file_size", "BIGINT"},
+                                                {"target_file_size", "VARCHAR"},
+                                                {"max_compacted_files", "BIGINT"},
+                                                {"high_min", "BIGINT"},
+                                                {"medium_min", "BIGINT"},
+                                                {"low_min", "BIGINT"},
+                                                {"byte_budget", "BIGINT"},
+                                                {"max_rewrite_steps", "BIGINT"}};
+
+static const size_t kPolicyValueColCount = sizeof(kPolicyValueCols) / sizeof(kPolicyValueCols[0]);
 
 static const char *kSchemaSQL = "CREATE SCHEMA IF NOT EXISTS __lakemon";
-static const char *kTableSQL =
-    "CREATE TABLE IF NOT EXISTS __lakemon.policy ("
-    "catalog VARCHAR NOT NULL, "
-    "kind VARCHAR NOT NULL, "
-    "name VARCHAR NOT NULL, "
-    "min_file_size BIGINT, "
-    "max_file_size BIGINT, "
-    "target_file_size VARCHAR, "
-    "max_compacted_files BIGINT, "
-    "high_min BIGINT, "
-    "medium_min BIGINT, "
-    "low_min BIGINT, "
-    "byte_budget BIGINT, "
-    "max_rewrite_steps BIGINT, "
-    "PRIMARY KEY (catalog, kind, name))";
 
 static const char *kAlterSQL[] = {"ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS high_min BIGINT",
                                   "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS medium_min BIGINT",
@@ -53,24 +45,82 @@ static const char *kAlterSQL[] = {"ALTER TABLE __lakemon.policy ADD COLUMN IF NO
 
 static std::string PolicySelectList() {
 	std::ostringstream sql;
-	const size_t n = sizeof(kPolicyValueCols) / sizeof(kPolicyValueCols[0]);
-	for (size_t i = 0; i < n; i++) {
+	for (size_t i = 0; i < kPolicyValueColCount; i++) {
 		if (i > 0) {
 			sql << ", ";
 		}
-		sql << kPolicyValueCols[i];
+		sql << kPolicyValueCols[i].name;
 	}
 	return sql.str();
 }
 
+static std::string PolicyCreateTableSQL() {
+	std::ostringstream sql;
+	sql << "CREATE TABLE IF NOT EXISTS __lakemon.policy (catalog VARCHAR NOT NULL";
+	for (size_t i = 0; i < kPolicyValueColCount; i++) {
+		sql << ", " << kPolicyValueCols[i].name << " " << kPolicyValueCols[i].ddl_type;
+	}
+	sql << ", PRIMARY KEY (catalog, kind, name))";
+	return sql.str();
+}
+
 static duckdb::idx_t PolicyCol(const char *name) {
-	const size_t n = sizeof(kPolicyValueCols) / sizeof(kPolicyValueCols[0]);
-	for (duckdb::idx_t i = 0; i < n; i++) {
-		if (std::strcmp(kPolicyValueCols[i], name) == 0) {
+	for (duckdb::idx_t i = 0; i < static_cast<duckdb::idx_t>(kPolicyValueColCount); i++) {
+		if (std::strcmp(kPolicyValueCols[i].name, name) == 0) {
 			return i;
 		}
 	}
-	return static_cast<duckdb::idx_t>(n);
+	return static_cast<duckdb::idx_t>(kPolicyValueColCount);
+}
+
+static std::string PolicyValueLiteral(const policy::StoredPolicyRow &row, const char *name) {
+	if (std::strcmp(name, "kind") == 0) {
+		return QuoteString(row.kind);
+	}
+	if (std::strcmp(name, "name") == 0) {
+		return QuoteString(row.name);
+	}
+	if (std::strcmp(name, "min_file_size") == 0) {
+		return std::to_string(row.min_file_size);
+	}
+	if (std::strcmp(name, "max_file_size") == 0) {
+		return std::to_string(row.max_file_size);
+	}
+	if (std::strcmp(name, "target_file_size") == 0) {
+		return QuoteString(row.target_file_size);
+	}
+	if (std::strcmp(name, "max_compacted_files") == 0) {
+		return std::to_string(row.max_compacted_files);
+	}
+	if (std::strcmp(name, "high_min") == 0) {
+		return std::to_string(row.high_min);
+	}
+	if (std::strcmp(name, "medium_min") == 0) {
+		return std::to_string(row.medium_min);
+	}
+	if (std::strcmp(name, "low_min") == 0) {
+		return std::to_string(row.low_min);
+	}
+	if (std::strcmp(name, "byte_budget") == 0) {
+		return std::to_string(row.byte_budget);
+	}
+	if (std::strcmp(name, "max_rewrite_steps") == 0) {
+		return std::to_string(row.max_rewrite_steps);
+	}
+	throw InvalidInputException("lakemon: unknown policy column '%s'", name);
+}
+
+static std::string PolicyInsertValues(const std::string &catalog, const policy::StoredPolicyRow &row) {
+	std::ostringstream sql;
+	sql << QuoteString(catalog);
+	for (size_t i = 0; i < kPolicyValueColCount; i++) {
+		sql << ", " << PolicyValueLiteral(row, kPolicyValueCols[i].name);
+	}
+	return sql.str();
+}
+
+static bool IsAbsentPolicyStore(const std::string &msg) {
+	return msg.find("does not exist") != std::string::npos;
 }
 
 static void TryMigratePolicyStore(duckdb::ClientContext &context) {
@@ -82,16 +132,19 @@ static void TryMigratePolicyStore(duckdb::ClientContext &context) {
 			throw;
 		} catch (const std::bad_alloc &) {
 			throw;
-		} catch (const duckdb::Exception &) {
-			// Table may not exist yet (no overrides).
-		} catch (const std::exception &) {
+		} catch (const duckdb::Exception &ex) {
+			const std::string msg = SafeWhat(ex);
+			if (IsAbsentPolicyStore(msg)) {
+				continue;
+			}
+			throw;
 		}
 	}
 }
 
 void EnsurePolicyStore(duckdb::ClientContext &context) {
 	RunSQL(context, kSchemaSQL);
-	RunSQL(context, kTableSQL);
+	RunSQL(context, PolicyCreateTableSQL());
 	TryMigratePolicyStore(context);
 }
 
@@ -193,10 +246,7 @@ void UpsertStoredPolicyRow(duckdb::ClientContext &context, const std::string &ca
 	EnsurePolicyStore(context);
 	std::ostringstream sql;
 	sql << "INSERT OR REPLACE INTO __lakemon.policy (catalog, " << PolicySelectList() << ") VALUES ("
-	    << QuoteString(catalog) << ", " << QuoteString(row.kind) << ", " << QuoteString(row.name) << ", "
-	    << row.min_file_size << ", " << row.max_file_size << ", " << QuoteString(row.target_file_size) << ", "
-	    << row.max_compacted_files << ", " << row.high_min << ", " << row.medium_min << ", " << row.low_min << ", "
-	    << row.byte_budget << ", " << row.max_rewrite_steps << ")";
+	    << PolicyInsertValues(catalog, row) << ")";
 	RunSQL(context, sql.str());
 }
 

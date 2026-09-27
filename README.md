@@ -86,7 +86,7 @@ SELECT lakemon_version();
 
 `table` may be `table` (schema `main`) or `schema.table`.
 
-Named parameters override native DuckLake catalog options for that invocation. When a named expire/cleanup interval is omitted, lakemon uses `expire_older_than` / `delete_older_than` from `ducklake_options` / `catalog.options()` (usually global). Catalog-wide maintain skips tables with `auto_compact = false`; an explicit table argument still maintains that table. When DuckLake `rewrite_delete_threshold` is set (table → schema → global), lakemon emits **one** rewrite `CALL` with that value instead of per-band data-driven thresholds; files below `low_min` are still skipped. Otherwise each planned delete-count band is its own `ducklake_rewrite_data_files` `CALL`. `target_file_size` informs the merge target and is not overwritten when already set on the catalog.
+Named parameters override native DuckLake catalog options for that invocation. When a named expire/cleanup interval is omitted, lakemon uses `expire_older_than` / `delete_older_than` from `ducklake_options` / `catalog.options()` (usually global). Catalog-wide maintain skips tables with `auto_compact = false`; an explicit table argument still maintains that table. When DuckLake `rewrite_delete_threshold` is set (table → schema → global), lakemon emits **one** rewrite `CALL` with that value (full override of per-band thresholds and CALL count). Files already planned stay in that one step; `max_rewrite_steps` / `byte_budget` have already been applied, and files below `low_min` stay skipped. Otherwise each planned delete-count band is its own `ducklake_rewrite_data_files` `CALL`. `target_file_size` informs the merge target and is not overwritten when already set on the catalog.
 
 Execution order:
 

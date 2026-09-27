@@ -178,7 +178,14 @@ static void TestNativeOptionsCollapseAdaptiveRungs() {
 	medium.file_size_bytes = 4 * kMiB;
 	medium.record_count = 10000;
 	medium.delete_count = 8000;
-	TableHint hint = SummarizeTable({high, medium}, policy);
+	FileStat tiny;
+	tiny.schema_name = "main";
+	tiny.table_name = "events";
+	tiny.data_file_id = 3;
+	tiny.file_size_bytes = 8000;
+	tiny.record_count = 100;
+	tiny.delete_count = 20; // below low_min
+	TableHint hint = SummarizeTable({high, medium, tiny}, policy);
 	Expect(hint.rewrite_steps.size() == 2, "adaptive plan has two rungs before overlay");
 	Expect(hint.rewrite_steps[0].band == "high", "first planned band is high");
 
@@ -194,6 +201,44 @@ static void TestNativeOptionsCollapseAdaptiveRungs() {
 	Expect(std::abs(hint.rewrite_threshold - 0.50) < 1e-9, "DuckLake option is the CALL threshold");
 	Expect(hint.rewrite_plan.find("band=catalog") != std::string::npos, "plan shows catalog step");
 	Expect(hint.rewrite_plan.find("delete_threshold=0.5") != std::string::npos, "catalog plan keeps the operator threshold");
+	Expect(hint.rewrite_steps[0].files.size() == 2, "collapse unions planned rungs only");
+	bool saw_tiny = false;
+	for (const auto &file : hint.rewrite_steps[0].files) {
+		if (file.data_file_id == 3) {
+			saw_tiny = true;
+		}
+	}
+	Expect(!saw_tiny, "files below low_min stay skipped after catalog collapse");
+}
+
+static void TestCatalogCollapseHonorsPriorStepCap() {
+	ActivePolicy policy = DefaultPolicy();
+	PolicyFieldPatch patch;
+	patch.set_max_rewrite_steps = true;
+	patch.max_rewrite_steps = 1;
+	std::string error;
+	Expect(ApplyPolicyPatch(policy, "rewrite_ladder", "default", patch, error), "cap to one planned rung");
+
+	FileStat high = HighChurnFile();
+	FileStat medium = high;
+	medium.data_file_id = 2;
+	medium.delete_count = 2000;
+	medium.record_count = 4000;
+	TableHint hint = SummarizeTable({high, medium}, policy);
+	Expect(hint.rewrite_steps.size() == 1 && hint.rewrite_steps[0].band == "high",
+	       "cap drops medium before catalog overlay");
+
+	std::vector<OptionBinding> options;
+	OptionBinding catalog;
+	catalog.name = "rewrite_delete_threshold";
+	catalog.value = "0.25";
+	catalog.scope = "GLOBAL";
+	options.push_back(catalog);
+	ApplyNativeOptions(hint, options);
+	Expect(hint.rewrite_steps.size() == 1, "catalog is a full CALL-count override");
+	Expect(hint.rewrite_steps[0].files.size() == 1 && hint.rewrite_steps[0].files[0].data_file_id == 1,
+	       "collapse does not bring back rungs dropped by max_rewrite_steps");
+	Expect(std::abs(hint.rewrite_threshold - 0.25) < 1e-9, "catalog threshold replaces the derived one");
 }
 
 static void TestEmptyPatchRejected() {
@@ -232,6 +277,7 @@ int main() {
 	TestOverriddenLadderClassifies();
 	TestOverriddenMergeBand();
 	TestNativeOptionsCollapseAdaptiveRungs();
+	TestCatalogCollapseHonorsPriorStepCap();
 	TestEmptyPatchRejected();
 	TestMaxRewriteStepsPatch();
 	if (TestFailures()) {

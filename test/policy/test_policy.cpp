@@ -99,6 +99,9 @@ static void TestAssignBandUsesDeleteCountNotRatio() {
 	Expect(AssignDeleteBand(100, ladder, band) && band == DeleteBand::Low, "100 is low");
 	Expect(!AssignDeleteBand(99, ladder, band), "99 is below low_min");
 	Expect(!AssignDeleteBand(0, ladder, band), "0 is below low_min");
+	Expect(DeleteBandIndex(DeleteBand::High) == 0 && DeleteBandIndex(DeleteBand::Medium) == 1 &&
+	           DeleteBandIndex(DeleteBand::Low) == 2,
+	       "band index matches groups[] slots");
 	Expect(std::string(DeleteBandName(DeleteBand::High)) == "high", "high name");
 	Expect(std::string(DeleteBandName(DeleteBand::Medium)) == "medium", "medium name");
 	Expect(std::string(DeleteBandName(DeleteBand::Low)) == "low", "low name");
