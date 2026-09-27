@@ -311,7 +311,7 @@ static void TestMultiBandPlanEmitsDistinctCalls() {
 	Expect(preview[0].details.find("band=high") != std::string::npos && preview[1].details.find("band=medium") != std::string::npos,
 	       "each row names its band");
 
-	const std::string skip_high = preview[0].details + " | skipped: flush_inlined failed";
+	const std::string skip_high = preview[0].details + " | auto_compact=false";
 	Expect(skip_high.find("band=high") != std::string::npos && skip_high.find("planned_deletes=50000") != std::string::npos,
 	       "skip/error rows keep the planned rung, not an opaque rewrite");
 	const std::string ok_high = preview[0].details + " | created=1";
@@ -359,15 +359,13 @@ static void TestOneFileDoesNotHintMerge() {
 	Expect(hint.merge_tier_hint == "none", "one file stays below the 2ULL merge hint");
 }
 
-static void TestPipelineDependsOnFlush() {
-	Expect(lakemon::StepDependsOnFlush("rewrite"), "rewrite depends on flush_inlined");
-	Expect(lakemon::StepDependsOnFlush("merge"), "merge depends on flush_inlined");
-	Expect(!lakemon::StepDependsOnFlush("expire_snapshots"), "expire is independent of flush");
-	Expect(!lakemon::StepDependsOnFlush("cleanup_old_files"), "cleanup is independent of flush");
-	Expect(!lakemon::StepDependsOnFlush("delete_orphaned_files"), "orphan cleanup is independent of flush");
-	Expect(!lakemon::StepDependsOnFlush("inventory"), "inventory is not a flush dependent");
-	Expect(std::string(lakemon::SkipReasonFlushFailed()) == "skipped: flush_inlined failed",
-	       "skip reason is explicit");
+static void TestPipelineStepsAreIndependent() {
+	Expect(lakemon::InventoryFailureStopsPipeline(), "hard inventory failure stops rewrite/merge");
+	Expect(!lakemon::FlushErrorSkipsStep("rewrite"), "flush error does not skip rewrite");
+	Expect(!lakemon::FlushErrorSkipsStep("merge"), "flush error does not skip merge");
+	Expect(!lakemon::FlushErrorSkipsStep("expire_snapshots"), "flush error does not skip expire");
+	Expect(!lakemon::FlushErrorSkipsStep("cleanup_old_files"), "flush error does not skip cleanup");
+	Expect(!lakemon::FlushErrorSkipsStep("delete_orphaned_files"), "flush error does not skip orphan cleanup");
 }
 
 static void TestFormatInventoryDiagnosticsJoinsAll() {
@@ -409,7 +407,7 @@ int main() {
 	TestMergeTiers();
 	TestTableHintMerge();
 	TestOneFileDoesNotHintMerge();
-	TestPipelineDependsOnFlush();
+	TestPipelineStepsAreIndependent();
 	TestFormatInventoryDiagnosticsJoinsAll();
 	if (TestFailures()) {
 		std::cerr << TestFailures() << " failure(s)" << std::endl;

@@ -1,19 +1,20 @@
-// Maintain step dependency after a failed predecessor.
-// Header-only so the rule can be tested without DuckDB.
+// Maintain pipeline rules. Header-only so the contract can be tested without DuckDB.
 #pragma once
 
 #include <string>
 
 namespace lakemon {
 
-// rewrite and merge read flushed data files, so they depend on flush_inlined.
-// expire_snapshots and cleanup are retention and stay independent.
-inline bool StepDependsOnFlush(const std::string &step) {
-	return step == "rewrite" || step == "merge";
+// After inventory succeeds, each native CALL is best-effort and independent.
+// A flush_inlined error is recorded as status=error; rewrite and merge still run.
+// Only a hard inventory failure stops the pipeline before rewrite/merge.
+inline bool InventoryFailureStopsPipeline() {
+	return true;
 }
 
-inline const char *SkipReasonFlushFailed() {
-	return "skipped: flush_inlined failed";
+inline bool FlushErrorSkipsStep(const std::string &step) {
+	(void)step;
+	return false;
 }
 
 } // namespace lakemon

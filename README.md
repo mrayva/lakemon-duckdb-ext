@@ -99,11 +99,11 @@ Execution order:
 
 Result columns: `step`, `schema_name`, `table_name`, `action`, `status`, `files_processed`, `files_created`, `details`.
 
-Rewrite emits **one result row per planned band** (`action` is `high` / `medium` / `low`, or `catalog` when DuckLake `rewrite_delete_threshold` is set). `details` always includes `band`, `delete_threshold`, `planned_files`, `planned_bytes`, and `planned_deletes`. `files_processed` is that rung's planned file count. `dry_run => true` sets `status=planned` and appends the generated `CALL`. After execute, `status` is `ok` / `skip` / `error`: `ok` appends `created=` (DuckLake result rows), `error` keeps the planned counts and appends the message, and flush / `auto_compact` skips still list each computed rung.
+Rewrite emits **one result row per planned band** (`action` is `high` / `medium` / `low`, or `catalog` when DuckLake `rewrite_delete_threshold` is set). `details` always includes `band`, `delete_threshold`, `planned_files`, `planned_bytes`, and `planned_deletes`. `files_processed` is that rung's planned file count. `dry_run => true` sets `status=planned` and appends the generated `CALL`. After execute, `status` is `ok` / `skip` / `error`: `ok` appends `created=` (DuckLake result rows), `error` keeps the planned counts and appends the message, and `auto_compact` skips still list each computed rung.
 
 Failed catalog inventory or a nested DuckLake `CALL` becomes `status = error` (`details` holds the message). Unread per-table metadata is an inventory `error` row (not a silent drop); tables that were read still proceed. The DuckDB session stays usable. A total inventory failure stops the plan.
 
-`flush_inlined` is a prerequisite for rewrite and merge: if it errors, those steps are `status = skip` with reason `skipped: flush_inlined failed`. Rewrite, merge, expire, and cleanup are independent of each other — a rewrite/merge error does not skip retention. Interrupt and out-of-memory are not swallowed.
+After inventory succeeds, flush, rewrite, merge, expire, and cleanup are **independent** (best-effort). A `flush_inlined` error is recorded as `status = error` and rewrite/merge still run. A rewrite/merge error does not skip retention. Interrupt and out-of-memory are not swallowed.
 
 ### `CALL lakemon_table_stats(catalog [, table])`
 
@@ -169,7 +169,7 @@ Files ≥ 64 MiB are left alone.
 
 ## Tips
 
-- **Partial maintain.** For a single step, call the native DuckLake functions directly (`ducklake_flush_inlined_data`, `ducklake_rewrite_data_files`, `ducklake_merge_adjacent_files`, `ducklake_expire_snapshots`, `ducklake_cleanup_old_files` / `ducklake_delete_orphaned_files`). `lakemon_maintain` is the full orchestrated pass (ladder + bands + pipeline). Plan with `lakemon_table_stats` and `dry_run => true`. If `flush_inlined` fails, rewrite and merge are `status = skip` (`skipped: flush_inlined failed`); expire and cleanup still run.
+- **Partial maintain.** For a single step, call the native DuckLake functions directly (`ducklake_flush_inlined_data`, `ducklake_rewrite_data_files`, `ducklake_merge_adjacent_files`, `ducklake_expire_snapshots`, `ducklake_cleanup_old_files` / `ducklake_delete_orphaned_files`). `lakemon_maintain` is the full orchestrated pass (ladder + bands + pipeline). Plan with `lakemon_table_stats` and `dry_run => true`. If `flush_inlined` fails, rewrite and merge still run; each step records its own `ok` / `skip` / `error`.
 - **Large backlog.** No wall-clock budget in lakemon today. Prefer one table (`CALL lakemon_maintain('lake', 'schema.t')`), tighter policy via `lakemon_set_policy` / DuckLake `set_option`, or native `CALL`s with file caps (`max_compacted_files`). An unbounded full-catalog pass can run a long time; escape hatch is per-table / native steps.
 
 ## Building

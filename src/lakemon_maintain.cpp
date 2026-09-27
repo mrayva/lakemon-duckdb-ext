@@ -2,7 +2,6 @@
 
 #include "lakemon_catalog.hpp"
 #include "lakemon_compat.hpp"
-#include "lakemon_pipeline.hpp"
 #include "lakemon_policy.hpp"
 #include "lakemon_store.hpp"
 
@@ -75,20 +74,11 @@ static void AppendRewriteSkips(std::vector<MaintainRow> &rows, const policy::Tab
 	}
 }
 
-static bool HasStepStatus(const std::vector<MaintainRow> &rows, const std::string &step, const std::string &status) {
-	for (const auto &row : rows) {
-		if (row.step == step && row.status == status) {
-			return true;
-		}
-	}
-	return false;
-}
-
-// Inventory failure: status=error row(s), then stop (do not CALL rewrite/merge
+// Inventory hard-failure: status=error row(s), then stop (do not CALL rewrite/merge
 // against an unread catalog). Unread per-table metadata: status=error diagnostic
-// rows; continue with tables that were read. flush_inlined failure: rewrite and
-// merge are skipped (status=skip). expire/cleanup are independent and still run
-// after a flush/rewrite/merge error. InterruptException and bad_alloc rethrow.
+// rows; continue with tables that were read. After inventory succeeds, flush,
+// rewrite, merge, expire, and cleanup are independent: a flush_inlined error is
+// recorded and rewrite/merge still run. InterruptException and bad_alloc rethrow.
 // The session stays usable.
 std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const MaintainOptions &options) {
 	std::vector<MaintainRow> rows;
@@ -149,16 +139,11 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	AppendCall(rows, context, options, "flush_inlined", "ducklake_flush_inlined_data",
 	           FlushInlinedDataCall(options.catalog, options.table), options.table.schema, options.table.table,
 	           "flush inlined rows before rewrite/merge");
-	const bool flush_failed = HasStepStatus(rows, "flush_inlined", "error");
 
 	for (const auto &hint : hints) {
 		TableRef ref;
 		ref.schema = hint.schema_name;
 		ref.table = hint.table_name;
-		if (flush_failed && StepDependsOnFlush("rewrite")) {
-			AppendRewriteSkips(rows, hint, SkipReasonFlushFailed());
-			continue;
-		}
 		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
 			AppendRewriteSkips(rows, hint, "auto_compact=false");
 			continue;
@@ -184,11 +169,6 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			if (file.schema_name == hint.schema_name && file.table_name == hint.table_name) {
 				table_files.push_back(file);
 			}
-		}
-		if (flush_failed && StepDependsOnFlush("merge")) {
-			rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name, "adjacent_files", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, SkipReasonFlushFailed()));
-			continue;
 		}
 		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
 			rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name, "auto_compact", "skip",
