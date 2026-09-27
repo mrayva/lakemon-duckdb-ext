@@ -41,7 +41,7 @@ medium
 micro
 small
 
-query I
+query II
 SELECT min_value, threshold_or_target FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
 ----
 10000	data-driven
