@@ -99,6 +99,8 @@ Execution order:
 
 Result columns: `step`, `schema_name`, `table_name`, `action`, `status`, `files_processed`, `files_created`, `details`.
 
+Rewrite emits **one result row per planned band** (`action` is `high` / `medium` / `low`, or `catalog` when DuckLake `rewrite_delete_threshold` is set). `details` always includes `band`, `delete_threshold`, `planned_files`, `planned_bytes`, and `planned_deletes`. `files_processed` is that rung's planned file count. `dry_run => true` sets `status=planned` and appends the generated `CALL`. After execute, `status` is `ok` / `skip` / `error`: `ok` appends `created=` (DuckLake result rows), `error` keeps the planned counts and appends the message, and flush / `auto_compact` skips still list each computed rung.
+
 Failed catalog inventory or a nested DuckLake `CALL` becomes `status = error` (`details` holds the message). Unread per-table metadata is an inventory `error` row (not a silent drop); tables that were read still proceed. The DuckDB session stays usable. A total inventory failure stops the plan.
 
 `flush_inlined` is a prerequisite for rewrite and merge: if it errors, those steps are `status = skip` with reason `skipped: flush_inlined failed`. Rewrite, merge, expire, and cleanup are independent of each other — a rewrite/merge error does not skip retention. Interrupt and out-of-memory are not swallowed.

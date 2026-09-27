@@ -41,22 +41,37 @@ static int64_t CountResultRows(duckdb::ClientContext &context, const std::string
 
 static void AppendCall(std::vector<MaintainRow> &rows, duckdb::ClientContext &context, const MaintainOptions &options,
                        const std::string &step, const std::string &action, const std::string &sql,
-                       const std::string &schema, const std::string &table, const std::string &details) {
+                       const std::string &schema, const std::string &table, const std::string &details,
+                       int64_t processed = 0) {
 	if (options.dry_run) {
-		rows.push_back(MakeRow(step, schema, table, action, "planned", 0, 0, details + " | " + sql));
+		rows.push_back(MakeRow(step, schema, table, action, "planned", processed, 0, details + " | " + sql));
 		return;
 	}
 	try {
 		const int64_t created = CountResultRows(context, sql);
-		rows.push_back(MakeRow(step, schema, table, action, "ok", 0, created, details));
+		rows.push_back(MakeRow(step, schema, table, action, "ok", processed, created,
+		                       details + " | created=" + std::to_string(created)));
 	} catch (const duckdb::InterruptException &) {
 		throw;
 	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const Exception &ex) {
-		rows.push_back(MakeRow(step, schema, table, action, "error", 0, 0, SafeWhat(ex)));
+		rows.push_back(MakeRow(step, schema, table, action, "error", processed, 0, details + " | " + SafeWhat(ex)));
 	} catch (const std::exception &ex) {
-		rows.push_back(MakeRow(step, schema, table, action, "error", 0, 0, SafeWhat(ex)));
+		rows.push_back(MakeRow(step, schema, table, action, "error", processed, 0, details + " | " + SafeWhat(ex)));
+	}
+}
+
+static void AppendRewriteSkips(std::vector<MaintainRow> &rows, const policy::TableHint &hint, const std::string &reason) {
+	if (hint.rewrite_steps.empty()) {
+		rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "none", "skip",
+		                       static_cast<int64_t>(hint.file_count), 0, reason));
+		return;
+	}
+	for (const auto &step : hint.rewrite_steps) {
+		rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, step.band, "skip",
+		                       static_cast<int64_t>(step.files.size()), 0,
+		                       policy::FormatRewriteStepDetails(step) + " | " + reason));
 	}
 }
 
@@ -141,28 +156,22 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 		ref.schema = hint.schema_name;
 		ref.table = hint.table_name;
 		if (flush_failed && StepDependsOnFlush("rewrite")) {
-			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "adaptive_ladder", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, SkipReasonFlushFailed()));
+			AppendRewriteSkips(rows, hint, SkipReasonFlushFailed());
 			continue;
 		}
 		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
-			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "adaptive_ladder", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, hint.rewrite_plan + " auto_compact=false"));
+			AppendRewriteSkips(rows, hint, "auto_compact=false");
 			continue;
 		}
 		if (hint.rewrite_steps.empty()) {
-			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "adaptive_ladder", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, hint.rewrite_plan));
+			AppendRewriteSkips(rows, hint, hint.rewrite_plan);
 			continue;
 		}
 		for (const auto &step : hint.rewrite_steps) {
-			std::ostringstream details;
-			details << "band=" << step.band << " threshold=" << step.delete_threshold
-			        << " files=" << step.files.size() << " bytes=" << step.planned_bytes
-			        << " deletes=" << step.planned_deletes;
-			AppendCall(rows, context, options, "rewrite", std::string("band_") + step.band,
+			AppendCall(rows, context, options, "rewrite", step.band,
 			           RewriteDataFilesCall(options.catalog, ref, step.delete_threshold), hint.schema_name,
-			           hint.table_name, details.str());
+			           hint.table_name, policy::FormatRewriteStepDetails(step),
+			           static_cast<int64_t>(step.files.size()));
 		}
 	}
 

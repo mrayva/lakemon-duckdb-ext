@@ -285,9 +285,9 @@ static void TestMultiBandPlanEmitsDistinctCalls() {
 	Expect(hint.rewrite_steps[0].band == "high" && hint.rewrite_steps[1].band == "medium", "High then Medium");
 	Expect(hint.rewrite_steps[0].delete_threshold != hint.rewrite_steps[1].delete_threshold,
 	       "thresholds are data-driven and distinct");
-	Expect(hint.rewrite_plan.find("high threshold=") != std::string::npos, "plan surfaces high band");
-	Expect(hint.rewrite_plan.find("medium threshold=") != std::string::npos, "plan surfaces medium band");
-	Expect(hint.rewrite_plan.find("files=") != std::string::npos, "plan surfaces file counts");
+	Expect(hint.rewrite_plan.find("band=high") != std::string::npos, "plan surfaces high band");
+	Expect(hint.rewrite_plan.find("band=medium") != std::string::npos, "plan surfaces medium band");
+	Expect(hint.rewrite_plan.find("planned_files=") != std::string::npos, "plan surfaces file counts");
 
 	lakemon::TableRef ref;
 	ref.schema = "main";
@@ -297,6 +297,26 @@ static void TestMultiBandPlanEmitsDistinctCalls() {
 	Expect(high_sql != medium_sql, "each rung is its own CALL");
 	Expect(high_sql.find("delete_threshold => 0.05") != std::string::npos, "high CALL uses derived 0.05");
 	Expect(medium_sql.find("delete_threshold => 0.8") != std::string::npos, "medium CALL uses derived 0.8");
+
+	const auto preview = PreviewRewriteRows(hint.rewrite_steps);
+	Expect(preview.size() == 2, "maintain emits one result row per rung, not one opaque rewrite");
+	Expect(preview[0].action == "high" && preview[1].action == "medium", "action is the computed band");
+	Expect(preview[0].files_processed == 1 && preview[1].files_processed == 1, "files_processed is planned files");
+	Expect(preview[0].details.find("delete_threshold=0.05") != std::string::npos, "high row shows data-driven threshold");
+	Expect(preview[0].details.find("planned_files=1") != std::string::npos, "high row shows planned_files");
+	Expect(preview[0].details.find("planned_bytes=800000000") != std::string::npos, "high row shows planned_bytes");
+	Expect(preview[0].details.find("planned_deletes=50000") != std::string::npos, "high row shows planned_deletes");
+	Expect(preview[1].details.find("delete_threshold=0.8") != std::string::npos, "medium row shows data-driven threshold");
+	Expect(preview[1].details.find("planned_deletes=8000") != std::string::npos, "medium row shows planned_deletes");
+	Expect(preview[0].details.find("band=high") != std::string::npos && preview[1].details.find("band=medium") != std::string::npos,
+	       "each row names its band");
+
+	const std::string skip_high = preview[0].details + " | skipped: flush_inlined failed";
+	Expect(skip_high.find("band=high") != std::string::npos && skip_high.find("planned_deletes=50000") != std::string::npos,
+	       "skip/error rows keep the planned rung, not an opaque rewrite");
+	const std::string ok_high = preview[0].details + " | created=1";
+	Expect(ok_high.find("delete_threshold=0.05") != std::string::npos && ok_high.find("created=1") != std::string::npos,
+	       "execute ok keeps the plan and records how the CALL affected the table");
 }
 
 static void TestMergeTiers() {

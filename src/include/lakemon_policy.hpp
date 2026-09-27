@@ -590,6 +590,14 @@ inline std::vector<PlannedRewriteStep> PlanRewriteRungs(const std::vector<FileSt
 	return PlanRewriteRungs(files, DefaultRewriteLadder());
 }
 
+inline std::string FormatRewriteStepDetails(const PlannedRewriteStep &step) {
+	std::ostringstream out;
+	out << "band=" << step.band << " delete_threshold=" << step.delete_threshold
+	    << " planned_files=" << step.files.size() << " planned_bytes=" << step.planned_bytes
+	    << " planned_deletes=" << step.planned_deletes;
+	return out.str();
+}
+
 inline std::string FormatRewritePlan(const std::vector<PlannedRewriteStep> &steps) {
 	if (steps.empty()) {
 		return "none";
@@ -599,11 +607,29 @@ inline std::string FormatRewritePlan(const std::vector<PlannedRewriteStep> &step
 		if (i > 0) {
 			out << "; ";
 		}
-		const auto &step = steps[i];
-		out << step.band << " threshold=" << step.delete_threshold << " files=" << step.files.size()
-		    << " bytes=" << step.planned_bytes << " deletes=" << step.planned_deletes;
+		out << FormatRewriteStepDetails(steps[i]);
 	}
 	return out.str();
+}
+
+// One maintain result row per planned rewrite CALL. Tests use this so dry_run
+// / execute rows stay self-explanatory without a live DuckLake session.
+struct RewriteRowPreview {
+	std::string action;
+	int64_t files_processed = 0;
+	std::string details;
+};
+
+inline std::vector<RewriteRowPreview> PreviewRewriteRows(const std::vector<PlannedRewriteStep> &steps) {
+	std::vector<RewriteRowPreview> rows;
+	for (const auto &step : steps) {
+		RewriteRowPreview row;
+		row.action = step.band;
+		row.files_processed = static_cast<int64_t>(step.files.size());
+		row.details = FormatRewriteStepDetails(step);
+		rows.push_back(std::move(row));
+	}
+	return rows;
 }
 
 inline std::string FormatRewriteLadderNotes(const DeleteCountLadder &ladder) {

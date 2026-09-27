@@ -192,7 +192,8 @@ static void TestNativeOptionsCollapseAdaptiveRungs() {
 	Expect(hint.rewrite_steps.size() == 1, "catalog option collapses to one CALL");
 	Expect(hint.rewrite_steps[0].band == "catalog", "collapsed step is catalog");
 	Expect(std::abs(hint.rewrite_threshold - 0.50) < 1e-9, "DuckLake option is the CALL threshold");
-	Expect(hint.rewrite_plan.find("catalog threshold=") != std::string::npos, "plan shows catalog step");
+	Expect(hint.rewrite_plan.find("band=catalog") != std::string::npos, "plan shows catalog step");
+	Expect(hint.rewrite_plan.find("delete_threshold=0.5") != std::string::npos, "catalog plan keeps the operator threshold");
 }
 
 static void TestEmptyPatchRejected() {
