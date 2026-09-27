@@ -161,6 +161,11 @@ Files are **not** split into equal ratio buckets (0–25 / 25–50 / …). Each 
 
 Files ≥ 64 MiB are left alone.
 
+## Tips
+
+- **Partial maintain.** For a single step, call the native DuckLake functions directly (`ducklake_flush_inlined_data`, `ducklake_rewrite_data_files`, `ducklake_merge_adjacent_files`, `ducklake_expire_snapshots`, `ducklake_cleanup_old_files` / `ducklake_delete_orphaned_files`). `lakemon_maintain` is the full orchestrated pass (ladder + bands + pipeline). Plan with `lakemon_table_stats` and `dry_run => true`. If `flush_inlined` fails, rewrite and merge are `status = skip` (`skipped: flush_inlined failed`); expire and cleanup still run.
+- **Large backlog.** No wall-clock budget in lakemon today. Prefer one table (`CALL lakemon_maintain('lake', 'schema.t')`), tighter policy via `lakemon_set_policy` / DuckLake `set_option`, or native `CALL`s with file caps (`max_compacted_files`). An unbounded full-catalog pass can run a long time; escape hatch is per-table / native steps.
+
 ## Building
 
 This repository follows the [DuckDB C++ extension template](https://github.com/duckdb/extension-template). Clone with submodules:
