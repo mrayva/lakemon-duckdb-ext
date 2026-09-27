@@ -693,11 +693,11 @@ inline void RefreshRewritePlan(TableHint &hint) {
 }
 
 // Overlay native DuckLake options (table → schema → global) on a table hint.
-// rewrite_delete_threshold, when set, is a full CALL-count override: already
-// planned rungs collapse to one CALL with that catalog value. max_rewrite_steps
-// and per-rung byte_budget have already been applied while planning; collapse
-// does not bring back dropped rungs or files below low_min. auto_compact is
-// honored by maintain.
+// rewrite_delete_threshold, when set, is a FULL override: one band=catalog CALL
+// with that threshold. max_rewrite_steps and per-rung byte_budget do not apply
+// after collapse (they already shaped the planned rungs; collapse does not
+// re-budget or emit extra CALLs). Files below low_min were filtered before
+// collapse and stay out. auto_compact is honored by maintain.
 inline void ApplyNativeOptions(TableHint &hint, const std::vector<OptionBinding> &options) {
 	const ResolvedOption rewrite =
 	    ResolveOption(options, "rewrite_delete_threshold", hint.schema_name, hint.table_name);

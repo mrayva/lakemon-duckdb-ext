@@ -119,8 +119,8 @@ static std::string PolicyInsertValues(const std::string &catalog, const policy::
 	return sql.str();
 }
 
-static bool IsAbsentPolicyStore(const std::string &msg) {
-	return msg.find("does not exist") != std::string::npos;
+static bool IsSoftPolicyMigrateError(const std::string &msg) {
+	return msg.find("does not exist") != std::string::npos || msg.find("already exists") != std::string::npos;
 }
 
 static void TryMigratePolicyStore(duckdb::ClientContext &context) {
@@ -134,7 +134,7 @@ static void TryMigratePolicyStore(duckdb::ClientContext &context) {
 			throw;
 		} catch (const duckdb::Exception &ex) {
 			const std::string msg = SafeWhat(ex);
-			if (IsAbsentPolicyStore(msg)) {
+			if (IsSoftPolicyMigrateError(msg)) {
 				continue;
 			}
 			throw;
