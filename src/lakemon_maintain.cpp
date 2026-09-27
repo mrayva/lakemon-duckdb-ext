@@ -115,7 +115,7 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	}
 
 	rows.push_back(MakeRow("inventory", "", "", "catalog_select", "ok", static_cast<int64_t>(files.size()),
-	                       static_cast<int64_t>(hints.size()), "byte_weighted rewrite ladder + merge size bands"));
+	                       static_cast<int64_t>(hints.size()), "adaptive delete-count rewrite ladder + merge size bands"));
 	if (!options_error.empty()) {
 		rows.push_back(MakeRow("catalog_options", "", "", "ducklake_options", "error", 0, 0, options_error));
 	}
@@ -140,30 +140,30 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 		TableRef ref;
 		ref.schema = hint.schema_name;
 		ref.table = hint.table_name;
-		std::ostringstream details;
-		details << "rung=" << hint.rewrite_rung << " threshold=" << hint.rewrite_threshold
-		        << " deleted_bytes=" << hint.deleted_bytes_weighted;
 		if (flush_failed && StepDependsOnFlush("rewrite")) {
-			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
+			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "adaptive_ladder", "skip",
 			                       static_cast<int64_t>(hint.file_count), 0, SkipReasonFlushFailed()));
 			continue;
 		}
 		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
-			details << " auto_compact=false";
-			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, details.str()));
+			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "adaptive_ladder", "skip",
+			                       static_cast<int64_t>(hint.file_count), 0, hint.rewrite_plan + " auto_compact=false"));
 			continue;
 		}
-		if (hint.rewrite_rung == "none" || hint.deleted_bytes_weighted == 0) {
-			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, details.str()));
+		if (hint.rewrite_steps.empty()) {
+			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "adaptive_ladder", "skip",
+			                       static_cast<int64_t>(hint.file_count), 0, hint.rewrite_plan));
 			continue;
 		}
-		std::ostringstream sql;
-		sql << "CALL ducklake_rewrite_data_files(" << QuoteString(options.catalog) << TableArg(ref)
-		    << SchemaNamed(ref) << ", delete_threshold => " << hint.rewrite_threshold << ")";
-		AppendCall(rows, context, options, "rewrite", "byte_weighted_ladder", sql.str(), hint.schema_name,
-		           hint.table_name, details.str());
+		for (const auto &step : hint.rewrite_steps) {
+			std::ostringstream details;
+			details << "band=" << step.band << " threshold=" << step.delete_threshold
+			        << " files=" << step.files.size() << " bytes=" << step.planned_bytes
+			        << " deletes=" << step.planned_deletes;
+			AppendCall(rows, context, options, "rewrite", std::string("band_") + step.band,
+			           RewriteDataFilesCall(options.catalog, ref, step.delete_threshold), hint.schema_name,
+			           hint.table_name, details.str());
+		}
 	}
 
 	for (const auto &hint : hints) {

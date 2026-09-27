@@ -17,9 +17,7 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 
 #include <exception>
-#include <iomanip>
 #include <new>
-#include <sstream>
 #include <vector>
 
 namespace duckdb {
@@ -184,7 +182,7 @@ static unique_ptr<FunctionData> StatsBind(ClientContext &, TableFunctionBindInpu
 	         "delete_count",
 	         "deleted_bytes_weighted",
 	         "delete_ratio",
-	         "rewrite_rung",
+	         "rewrite_plan",
 	         "rewrite_threshold",
 	         "merge_tier_hint",
 	         "target_file_size",
@@ -218,7 +216,7 @@ static unique_ptr<GlobalTableFunctionState> StatsInit(ClientContext &context, Ta
 		                       Value::BIGINT(static_cast<int64_t>(hint.delete_file_size_bytes)),
 		                       Value::BIGINT(static_cast<int64_t>(hint.delete_count)),
 		                       Value::BIGINT(static_cast<int64_t>(hint.deleted_bytes_weighted)), Value(hint.delete_ratio),
-		                       Value(hint.rewrite_rung), Value(hint.rewrite_threshold), Value(hint.merge_tier_hint),
+		                       Value(hint.rewrite_plan), Value(hint.rewrite_threshold), Value(hint.merge_tier_hint),
 		                       Value(hint.target_file_size), Value::BOOLEAN(hint.auto_compact)});
 	}
 	return std::move(state);
@@ -235,24 +233,15 @@ static void SetPolicyReturnTypes(vector<LogicalType> &return_types, lakemon::Col
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
 }
 
-static std::string FormatFixed2(double value) {
-	std::ostringstream out;
-	out << std::fixed << std::setprecision(2) << value;
-	return out.str();
-}
-
 static void EmitPolicy(RowState &state, const lakemon::policy::ActivePolicy &policy) {
-	for (const auto &rung : policy.ladder) {
-		const char *source = lakemon::policy::PolicyKeyOverridden(policy, lakemon::policy::kKindRewriteRung, rung.name)
-		                         ? lakemon::policy::kSourceOverride
-		                         : lakemon::policy::kSourceDefault;
-		state.rows.push_back({Value(lakemon::policy::kKindRewriteRung), Value(rung.name),
-		                      Value(std::to_string(rung.min_delete_count) + " deletes"),
-		                      Value(std::to_string(rung.min_deleted_bytes) + " deleted_bytes"),
-		                      Value(FormatFixed2(rung.rewrite_threshold)),
-		                      Value("byte_weighted; min_delete_ratio=" + FormatFixed2(rung.min_delete_ratio)),
-		                      Value(source)});
-	}
+	const char *source =
+	    lakemon::policy::PolicyKeyOverridden(policy, lakemon::policy::kKindRewriteLadder, lakemon::policy::kLadderName)
+	        ? lakemon::policy::kSourceOverride
+	        : lakemon::policy::kSourceDefault;
+	state.rows.push_back({Value(lakemon::policy::kKindRewriteLadder), Value(lakemon::policy::kLadderName),
+	                      Value(std::to_string(policy.rewrite.high_min)),
+	                      Value(std::to_string(policy.rewrite.low_min)), Value("data-driven"),
+	                      Value(lakemon::policy::FormatRewriteLadderNotes(policy.rewrite)), Value(source)});
 	for (const auto &tier : policy.tiers) {
 		const char *source = lakemon::policy::PolicyKeyOverridden(policy, lakemon::policy::kKindMergeTier, tier.name)
 		                         ? lakemon::policy::kSourceOverride
@@ -318,18 +307,20 @@ static void ParseNamedSetPolicy(TableFunctionBindInput &input, SetPolicyBindData
 			data.patch.reset = BooleanValue::Get(entry.second);
 		} else if (entry.first == "reset_all") {
 			data.reset_all = BooleanValue::Get(entry.second);
-		} else if (entry.first == "min_delete_count") {
-			data.patch.set_min_delete_count =
-			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.min_delete_count, "min_delete_count");
-		} else if (entry.first == "min_deleted_bytes") {
-			data.patch.set_min_deleted_bytes =
-			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.min_deleted_bytes, "min_deleted_bytes");
-		} else if (entry.first == "min_delete_ratio") {
-			data.patch.set_min_delete_ratio = true;
-			data.patch.min_delete_ratio = entry.second.GetValue<double>();
-		} else if (entry.first == "rewrite_threshold") {
-			data.patch.set_rewrite_threshold = true;
-			data.patch.rewrite_threshold = entry.second.GetValue<double>();
+		} else if (entry.first == "high_min") {
+			data.patch.set_high_min =
+			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.high_min, "high_min");
+		} else if (entry.first == "medium_min") {
+			data.patch.set_medium_min =
+			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.medium_min, "medium_min");
+		} else if (entry.first == "low_min") {
+			data.patch.set_low_min = AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.low_min, "low_min");
+		} else if (entry.first == "byte_budget") {
+			data.patch.set_byte_budget =
+			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.byte_budget, "byte_budget");
+		} else if (entry.first == "max_rewrite_steps") {
+			data.patch.set_max_rewrite_steps =
+			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.max_rewrite_steps, "max_rewrite_steps");
 		} else if (entry.first == "min_file_size") {
 			data.patch.set_min_file_size =
 			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.min_file_size, "min_file_size");
@@ -400,11 +391,8 @@ static unique_ptr<GlobalTableFunctionState> SetPolicyInit(ClientContext &context
 		}
 		if (bind.patch.reset) {
 			std::string stored_name = bind.name;
-			if (canonical == lakemon::policy::kKindRewriteRung) {
-				const auto *rung = lakemon::policy::FindRewriteRung(policy, bind.name);
-				if (rung) {
-					stored_name = rung->name;
-				}
+			if (canonical == lakemon::policy::kKindRewriteLadder) {
+				stored_name = lakemon::policy::kLadderName;
 			} else {
 				const auto *tier = lakemon::policy::FindMergeTier(policy, bind.name);
 				if (tier) {
@@ -416,14 +404,10 @@ static unique_ptr<GlobalTableFunctionState> SetPolicyInit(ClientContext &context
 			    {Value(canonical), Value(stored_name), Value("ok"), Value("reset to built-in default")});
 			return std::move(state);
 		}
-		if (canonical == lakemon::policy::kKindRewriteRung) {
-			const auto *rung = lakemon::policy::FindRewriteRung(policy, bind.name);
-			if (!rung) {
-				throw InvalidInputException("lakemon: unknown rewrite rung '%s'", bind.name);
-			}
-			lakemon::UpsertStoredPolicyRow(context, bind.catalog, lakemon::policy::RowFromRung(*rung));
-			state->rows.push_back({Value(canonical), Value(rung->name), Value("ok"),
-			                       Value("rewrite_threshold=" + FormatFixed2(rung->rewrite_threshold))});
+		if (canonical == lakemon::policy::kKindRewriteLadder) {
+			lakemon::UpsertStoredPolicyRow(context, bind.catalog, lakemon::policy::RowFromLadder(policy.rewrite));
+			state->rows.push_back({Value(canonical), Value(lakemon::policy::kLadderName), Value("ok"),
+			                       Value(lakemon::policy::FormatRewriteLadderNotes(policy.rewrite))});
 		} else {
 			const auto *tier = lakemon::policy::FindMergeTier(policy, bind.name);
 			if (!tier) {
@@ -461,10 +445,11 @@ static void AddNamedMaintainParams(TableFunction &function) {
 static void AddNamedSetPolicyParams(TableFunction &function) {
 	function.named_parameters["reset"] = LogicalType::BOOLEAN;
 	function.named_parameters["reset_all"] = LogicalType::BOOLEAN;
-	function.named_parameters["min_delete_count"] = LogicalType::BIGINT;
-	function.named_parameters["min_deleted_bytes"] = LogicalType::BIGINT;
-	function.named_parameters["min_delete_ratio"] = LogicalType::DOUBLE;
-	function.named_parameters["rewrite_threshold"] = LogicalType::DOUBLE;
+	function.named_parameters["high_min"] = LogicalType::BIGINT;
+	function.named_parameters["medium_min"] = LogicalType::BIGINT;
+	function.named_parameters["low_min"] = LogicalType::BIGINT;
+	function.named_parameters["byte_budget"] = LogicalType::BIGINT;
+	function.named_parameters["max_rewrite_steps"] = LogicalType::BIGINT;
 	function.named_parameters["min_file_size"] = LogicalType::BIGINT;
 	function.named_parameters["max_file_size"] = LogicalType::BIGINT;
 	function.named_parameters["target_file_size"] = LogicalType::VARCHAR;

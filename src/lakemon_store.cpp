@@ -18,14 +18,15 @@ using duckdb::InvalidInputException;
 // share this order; do not reorder without updating CREATE TABLE.
 static const char *kPolicyValueCols[] = {"kind",
                                          "name",
-                                         "min_delete_count",
-                                         "min_deleted_bytes",
-                                         "min_delete_ratio",
-                                         "rewrite_threshold",
                                          "min_file_size",
                                          "max_file_size",
                                          "target_file_size",
-                                         "max_compacted_files"};
+                                         "max_compacted_files",
+                                         "high_min",
+                                         "medium_min",
+                                         "low_min",
+                                         "byte_budget",
+                                         "max_rewrite_steps"};
 
 static const char *kSchemaSQL = "CREATE SCHEMA IF NOT EXISTS __lakemon";
 static const char *kTableSQL =
@@ -33,15 +34,22 @@ static const char *kTableSQL =
     "catalog VARCHAR NOT NULL, "
     "kind VARCHAR NOT NULL, "
     "name VARCHAR NOT NULL, "
-    "min_delete_count BIGINT, "
-    "min_deleted_bytes BIGINT, "
-    "min_delete_ratio DOUBLE, "
-    "rewrite_threshold DOUBLE, "
     "min_file_size BIGINT, "
     "max_file_size BIGINT, "
     "target_file_size VARCHAR, "
     "max_compacted_files BIGINT, "
+    "high_min BIGINT, "
+    "medium_min BIGINT, "
+    "low_min BIGINT, "
+    "byte_budget BIGINT, "
+    "max_rewrite_steps BIGINT, "
     "PRIMARY KEY (catalog, kind, name))";
+
+static const char *kAlterSQL[] = {"ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS high_min BIGINT",
+                                  "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS medium_min BIGINT",
+                                  "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS low_min BIGINT",
+                                  "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS byte_budget BIGINT",
+                                  "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS max_rewrite_steps BIGINT"};
 
 static std::string PolicySelectList() {
 	std::ostringstream sql;
@@ -65,29 +73,41 @@ static duckdb::idx_t PolicyCol(const char *name) {
 	return static_cast<duckdb::idx_t>(n);
 }
 
+static void TryMigratePolicyStore(duckdb::ClientContext &context) {
+	const size_t n = sizeof(kAlterSQL) / sizeof(kAlterSQL[0]);
+	for (size_t i = 0; i < n; i++) {
+		try {
+			RunSQL(context, kAlterSQL[i]);
+		} catch (const duckdb::InterruptException &) {
+			throw;
+		} catch (const std::bad_alloc &) {
+			throw;
+		} catch (const duckdb::Exception &) {
+			// Table may not exist yet (no overrides).
+		} catch (const std::exception &) {
+		}
+	}
+}
+
 void EnsurePolicyStore(duckdb::ClientContext &context) {
 	RunSQL(context, kSchemaSQL);
 	RunSQL(context, kTableSQL);
+	TryMigratePolicyStore(context);
 }
 
 static policy::StoredPolicyRow RowFromResult(QueryHandle &result, duckdb::idx_t i) {
 	policy::StoredPolicyRow row;
 	row.kind = CellString(result, PolicyCol("kind"), i);
 	row.name = CellString(result, PolicyCol("name"), i);
-	row.min_delete_count = static_cast<uint64_t>(CellInt64(result, PolicyCol("min_delete_count"), i));
-	row.min_deleted_bytes = static_cast<uint64_t>(CellInt64(result, PolicyCol("min_deleted_bytes"), i));
-	const std::string ratio = CellString(result, PolicyCol("min_delete_ratio"), i);
-	if (!ratio.empty()) {
-		policy::TryParseDouble(ratio, row.min_delete_ratio);
-	}
-	const std::string threshold = CellString(result, PolicyCol("rewrite_threshold"), i);
-	if (!threshold.empty()) {
-		policy::TryParseDouble(threshold, row.rewrite_threshold);
-	}
 	row.min_file_size = static_cast<uint64_t>(CellInt64(result, PolicyCol("min_file_size"), i));
 	row.max_file_size = static_cast<uint64_t>(CellInt64(result, PolicyCol("max_file_size"), i));
 	row.target_file_size = CellString(result, PolicyCol("target_file_size"), i);
 	row.max_compacted_files = static_cast<uint64_t>(CellInt64(result, PolicyCol("max_compacted_files"), i));
+	row.high_min = static_cast<uint64_t>(CellInt64(result, PolicyCol("high_min"), i));
+	row.medium_min = static_cast<uint64_t>(CellInt64(result, PolicyCol("medium_min"), i));
+	row.low_min = static_cast<uint64_t>(CellInt64(result, PolicyCol("low_min"), i));
+	row.byte_budget = static_cast<uint64_t>(CellInt64(result, PolicyCol("byte_budget"), i));
+	row.max_rewrite_steps = static_cast<uint64_t>(CellInt64(result, PolicyCol("max_rewrite_steps"), i));
 	return row;
 }
 
@@ -101,6 +121,7 @@ std::vector<policy::StoredPolicyRow> LoadStoredPolicyRows(duckdb::ClientContext 
 		return rows;
 	}
 	try {
+		TryMigratePolicyStore(context);
 		std::ostringstream sql;
 		sql << "SELECT " << PolicySelectList() << " FROM __lakemon.policy WHERE catalog = "
 		    << QuoteString(catalog);
@@ -171,10 +192,11 @@ void UpsertStoredPolicyRow(duckdb::ClientContext &context, const std::string &ca
 	}
 	EnsurePolicyStore(context);
 	std::ostringstream sql;
-	sql << "INSERT OR REPLACE INTO __lakemon.policy VALUES (" << QuoteString(catalog) << ", " << QuoteString(row.kind)
-	    << ", " << QuoteString(row.name) << ", " << row.min_delete_count << ", " << row.min_deleted_bytes << ", "
-	    << row.min_delete_ratio << ", " << row.rewrite_threshold << ", " << row.min_file_size << ", "
-	    << row.max_file_size << ", " << QuoteString(row.target_file_size) << ", " << row.max_compacted_files << ")";
+	sql << "INSERT OR REPLACE INTO __lakemon.policy (catalog, " << PolicySelectList() << ") VALUES ("
+	    << QuoteString(catalog) << ", " << QuoteString(row.kind) << ", " << QuoteString(row.name) << ", "
+	    << row.min_file_size << ", " << row.max_file_size << ", " << QuoteString(row.target_file_size) << ", "
+	    << row.max_compacted_files << ", " << row.high_min << ", " << row.medium_min << ", " << row.low_min << ", "
+	    << row.byte_budget << ", " << row.max_rewrite_steps << ")";
 	RunSQL(context, sql.str());
 }
 

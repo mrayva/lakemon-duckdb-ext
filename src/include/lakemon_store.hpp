@@ -10,7 +10,9 @@ namespace lakemon {
 
 // Persist lakemon rewrite-ladder / merge-band overrides in the current DuckDB
 // database (schema __lakemon). Rows are keyed by catalog name so each lake can
-// have its own policy. This is not a DuckLake set_option key.
+// have its own policy. This is not a DuckLake set_option key. Rewrite overrides
+// store adaptive floors (high_min / medium_min / low_min) plus optional
+// byte_budget and max_rewrite_steps.
 
 void EnsurePolicyStore(duckdb::ClientContext &context);
 

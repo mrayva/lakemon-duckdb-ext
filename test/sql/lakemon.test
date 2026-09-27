@@ -17,12 +17,12 @@ SELECT lakemon_version();
 query I
 SELECT count(*) FROM lakemon_policy();
 ----
-7
+4
 
 query I
-SELECT count(*) FROM lakemon_policy() WHERE kind = 'rewrite_rung';
+SELECT count(*) FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
 ----
-4
+1
 
 query I
 SELECT count(*) FROM lakemon_policy() WHERE kind = 'merge_tier';
@@ -30,12 +30,9 @@ SELECT count(*) FROM lakemon_policy() WHERE kind = 'merge_tier';
 3
 
 query I
-SELECT name FROM lakemon_policy() WHERE kind = 'rewrite_rung' ORDER BY name;
+SELECT name FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
 ----
-cool
 default
-hot
-warm
 
 query I
 SELECT name FROM lakemon_policy() WHERE kind = 'merge_tier' ORDER BY name;
@@ -45,9 +42,9 @@ micro
 small
 
 query I
-SELECT threshold_or_target FROM lakemon_policy() WHERE kind = 'rewrite_rung' AND name = 'hot';
+SELECT min_value, threshold_or_target FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
 ----
-0.15
+10000	data-driven
 
 query I
 SELECT threshold_or_target FROM lakemon_policy() WHERE kind = 'merge_tier' AND name = 'micro';
@@ -55,31 +52,31 @@ SELECT threshold_or_target FROM lakemon_policy() WHERE kind = 'merge_tier' AND n
 5MB
 
 query I
-SELECT source FROM lakemon_policy() WHERE kind = 'rewrite_rung' AND name = 'hot';
+SELECT source FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
 ----
 default
 
 # Persist does not require an attached DuckLake catalog.
 query II
-SELECT status, details FROM lakemon_set_policy('lake', 'rewrite_rung', 'hot', rewrite_threshold => 0.20);
+SELECT status, details FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', high_min => 20000);
 ----
-ok	rewrite_threshold=0.20
+ok	medium_min=1000; low_min=100; byte_budget=none; max_rewrite_steps=3
 
 query II
-SELECT threshold_or_target, source FROM lakemon_policy('lake') WHERE kind = 'rewrite_rung' AND name = 'hot';
+SELECT min_value, source FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
 ----
-0.20	override
+20000	override
 
 # Zero-arg form stays on built-in defaults.
 query II
-SELECT threshold_or_target, source FROM lakemon_policy() WHERE kind = 'rewrite_rung' AND name = 'hot';
+SELECT min_value, source FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
 ----
-0.15	default
+10000	default
 
 query I
-SELECT threshold_or_target FROM lakemon_policy('lake') WHERE kind = 'rewrite_rung' AND name = 'warm';
+SELECT notes FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
 ----
-0.40
+medium_min=1000; low_min=100; byte_budget=none; max_rewrite_steps=3
 
 query II
 SELECT status, details FROM lakemon_set_policy('lake', 'merge_tier', 'micro', target_file_size => '8MB', max_compacted_files => 128);
@@ -92,23 +89,23 @@ SELECT threshold_or_target, source FROM lakemon_policy('lake') WHERE kind = 'mer
 8MB	override
 
 query I
-SELECT status FROM lakemon_set_policy('lake', 'rewrite_rung', 'hot', reset => true);
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', reset => true);
 ----
 ok
 
 query I
-SELECT source FROM lakemon_policy('lake') WHERE kind = 'rewrite_rung' AND name = 'hot';
+SELECT source FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
 ----
 default
 
 query I
-SELECT status FROM lakemon_set_policy('other', 'rewrite_rung', 'cool', min_delete_ratio => 0.60);
+SELECT status FROM lakemon_set_policy('other', 'rewrite_ladder', 'default', low_min => 50);
 ----
 ok
 
 # Catalog keys are independent.
 query I
-SELECT source FROM lakemon_policy('lake') WHERE kind = 'rewrite_rung' AND name = 'cool';
+SELECT source FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
 ----
 default
 
@@ -118,12 +115,12 @@ SELECT status FROM lakemon_set_policy('other', reset_all => true);
 ok
 
 query I
-SELECT status FROM lakemon_set_policy('lake', 'rewrite_rung', 'scorching', rewrite_threshold => 0.10);
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'hot', high_min => 20000);
 ----
 error
 
 query I
-SELECT status FROM lakemon_set_policy('lake', 'rewrite_rung', 'hot', rewrite_threshold => 1.5);
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', high_min => 500);
 ----
 error
 

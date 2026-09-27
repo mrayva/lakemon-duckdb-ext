@@ -7,7 +7,7 @@
 
 extension:
   name: lakemon
-  description: Smart DuckLake maintenance with a byte-weighted rewrite ladder and merge size bands
+  description: Smart DuckLake maintenance with an adaptive delete-count rewrite ladder and merge size bands
   version: 0.1.0
   language: C++
   build: cmake
@@ -40,7 +40,7 @@ docs:
     lakemon orchestrates native DuckLake maintenance CALLs with a policy layer:
 
     * Catalog SELECT inventory of data files and delete files
-    * Byte-weighted rewrite ladder (delete count and deleted bytes; not equal-width ratio buckets)
+    * Adaptive delete-count rewrite ladder (High / Medium / Low; one ducklake_rewrite_data_files CALL per band)
     * Merge size bands (micro / small / medium) with per-tier target_file_size
     * Execute-by-default; pass dry_run => true to plan only
     * One result row per step (ok / skip / error / planned)
