@@ -200,11 +200,11 @@ inline TableHint SummarizeTable(const std::vector<FileStat> &files) {
 			break;
 		}
 	}
-	if (merge_micro >= 2) {
+	if (merge_micro >= 2ULL) {
 		hint.merge_tier_hint = "micro";
-	} else if (merge_small >= 2) {
+	} else if (merge_small >= 2ULL) {
 		hint.merge_tier_hint = "small";
-	} else if (merge_medium >= 2) {
+	} else if (merge_medium >= 2ULL) {
 		hint.merge_tier_hint = "medium";
 	}
 	return hint;

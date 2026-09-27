@@ -1,3 +1,5 @@
+#include "expect.hpp"
+#include "lakemon_pipeline.hpp"
 #include "lakemon_policy.hpp"
 
 #include <cmath>
@@ -6,15 +8,6 @@
 #include <string>
 
 using namespace lakemon::policy;
-
-static int failures = 0;
-
-static void Expect(bool cond, const std::string &msg) {
-	if (!cond) {
-		std::cerr << "FAIL: " << msg << std::endl;
-		failures++;
-	}
-}
 
 static void TestDeletedBytesUsesCountNotEqualBuckets() {
 	FileStat heavy;
@@ -109,6 +102,26 @@ static void TestTableHintMerge() {
 	Expect(hint.file_count == 5, "file_count");
 }
 
+static void TestOneFileDoesNotHintMerge() {
+	FileStat f;
+	f.schema_name = "s";
+	f.table_name = "t";
+	f.file_size_bytes = 100 * 1024;
+	const auto hint = SummarizeTable(std::vector<FileStat>(1, f));
+	Expect(hint.merge_tier_hint == "none", "one file stays below the 2ULL merge hint");
+}
+
+static void TestPipelineDependsOnFlush() {
+	Expect(lakemon::StepDependsOnFlush("rewrite"), "rewrite depends on flush_inlined");
+	Expect(lakemon::StepDependsOnFlush("merge"), "merge depends on flush_inlined");
+	Expect(!lakemon::StepDependsOnFlush("expire_snapshots"), "expire is independent of flush");
+	Expect(!lakemon::StepDependsOnFlush("cleanup_old_files"), "cleanup is independent of flush");
+	Expect(!lakemon::StepDependsOnFlush("delete_orphaned_files"), "orphan cleanup is independent of flush");
+	Expect(!lakemon::StepDependsOnFlush("inventory"), "inventory is not a flush dependent");
+	Expect(std::string(lakemon::SkipReasonFlushFailed()) == "skipped: flush_inlined failed",
+	       "skip reason is explicit");
+}
+
 int main() {
 	TestDeletedBytesUsesCountNotEqualBuckets();
 	TestHotRungByDeleteCount();
@@ -117,8 +130,10 @@ int main() {
 	TestByteWeightedThresholdPicksHot();
 	TestMergeTiers();
 	TestTableHintMerge();
-	if (failures) {
-		std::cerr << failures << " failure(s)" << std::endl;
+	TestOneFileDoesNotHintMerge();
+	TestPipelineDependsOnFlush();
+	if (TestFailures()) {
+		std::cerr << TestFailures() << " failure(s)" << std::endl;
 		return 1;
 	}
 	std::cout << "policy tests ok" << std::endl;

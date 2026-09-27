@@ -26,14 +26,14 @@ struct ResolvedOption {
 	}
 };
 
-inline char AsciiLower(char c) {
+inline char AsciiLower(char c) noexcept {
 	if (c >= 'A' && c <= 'Z') {
 		return static_cast<char>(c - 'A' + 'a');
 	}
 	return c;
 }
 
-inline bool EqualsCI(const std::string &a, const std::string &b) {
+inline bool EqualsCI(const std::string &a, const std::string &b) noexcept {
 	if (a.size() != b.size()) {
 		return false;
 	}
@@ -102,7 +102,7 @@ inline ResolvedOption ResolveOption(const std::vector<OptionBinding> &rows, cons
 	return global_hit;
 }
 
-inline bool TryParseDouble(const std::string &raw, double &out) {
+inline bool TryParseDouble(const std::string &raw, double &out) noexcept {
 	if (raw.empty()) {
 		return false;
 	}
@@ -121,7 +121,7 @@ inline bool TryParseDouble(const std::string &raw, double &out) {
 	return true;
 }
 
-inline bool TryParseBool(const std::string &raw, bool &out) {
+inline bool TryParseBool(const std::string &raw, bool &out) noexcept {
 	if (EqualsCI(raw, "true") || EqualsCI(raw, "1") || EqualsCI(raw, "yes")) {
 		out = true;
 		return true;
@@ -135,7 +135,7 @@ inline bool TryParseBool(const std::string &raw, bool &out) {
 
 // Catalog rewrite_delete_threshold, when set, is the value passed to
 // ducklake_rewrite_data_files (operator configured once). Otherwise use the ladder.
-inline double EffectiveRewriteThreshold(double ladder_threshold, const ResolvedOption &catalog) {
+inline double EffectiveRewriteThreshold(double ladder_threshold, const ResolvedOption &catalog) noexcept {
 	double catalog_value = 0;
 	if (catalog.found && TryParseDouble(catalog.value, catalog_value) && catalog_value >= 0.0 &&
 	    catalog_value <= 1.0) {
@@ -155,7 +155,7 @@ inline std::string EffectiveInterval(bool call_set, const std::string &call_valu
 	return std::string();
 }
 
-inline bool EffectiveAutoCompact(const ResolvedOption &catalog) {
+inline bool EffectiveAutoCompact(const ResolvedOption &catalog) noexcept {
 	bool value = true;
 	if (catalog.found && TryParseBool(catalog.value, value)) {
 		return value;
@@ -165,7 +165,7 @@ inline bool EffectiveAutoCompact(const ResolvedOption &catalog) {
 
 // Catalog-wide maintain skips tables with auto_compact=false. An explicit table
 // argument still maintains that table.
-inline bool SkipForAutoCompact(bool catalog_wide, bool auto_compact) {
+inline bool SkipForAutoCompact(bool catalog_wide, bool auto_compact) noexcept {
 	return catalog_wide && !auto_compact;
 }
 

@@ -9,6 +9,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}
   cancel-in-progress: true
@@ -17,7 +20,9 @@ jobs:
   policy:
     name: Policy tests (no DuckDB)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Compile and run policy tests
+        shell: bash
         run: make policy-test

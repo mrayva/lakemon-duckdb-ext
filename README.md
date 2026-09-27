@@ -93,7 +93,9 @@ Execution order:
 
 Result columns: `step`, `schema_name`, `table_name`, `action`, `status`, `files_processed`, `files_created`, `details`.
 
-Failed catalog inventory or a nested DuckLake `CALL` becomes `status = error` (`details` holds the message). The DuckDB session stays usable. Inventory failure stops the plan; later independent steps continue after a step error. Interrupt is not swallowed.
+Failed catalog inventory or a nested DuckLake `CALL` becomes `status = error` (`details` holds the message). Unread per-table metadata is an inventory `error` row (not a silent drop); tables that were read still proceed. The DuckDB session stays usable. A total inventory failure stops the plan.
+
+`flush_inlined` is a prerequisite for rewrite and merge: if it errors, those steps are `status = skip` with reason `skipped: flush_inlined failed`. Rewrite, merge, expire, and cleanup are independent of each other — a rewrite/merge error does not skip retention. Interrupt and out-of-memory are not swallowed.
 
 ### `CALL lakemon_table_stats(catalog [, table])`
 

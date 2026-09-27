@@ -17,6 +17,7 @@
 
 #include <exception>
 #include <iomanip>
+#include <new>
 #include <sstream>
 #include <vector>
 
@@ -109,6 +110,8 @@ static unique_ptr<FunctionData> MaintainBind(ClientContext &, TableFunctionBindI
 		ParseNamedMaintain(input, data->options);
 	} catch (const InterruptException &) {
 		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
 	} catch (const Exception &) {
 		throw;
 	} catch (const std::exception &ex) {
@@ -128,6 +131,8 @@ static unique_ptr<GlobalTableFunctionState> MaintainInit(ClientContext &context,
 	try {
 		rows = lakemon::RunMaintain(context, bind.options);
 	} catch (const InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const Exception &ex) {
 		lakemon::MaintainRow row;
@@ -187,6 +192,8 @@ static unique_ptr<GlobalTableFunctionState> StatsInit(ClientContext &context, Ta
 	try {
 		hints = lakemon::InventoryTables(context, bind.catalog, bind.table);
 	} catch (const InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const Exception &) {
 		throw;
