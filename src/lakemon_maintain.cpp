@@ -38,20 +38,6 @@ static int64_t CountResultRows(duckdb::ClientContext &context, const std::string
 	return static_cast<int64_t>(result->RowCount());
 }
 
-static std::string TableArg(const TableRef &ref) {
-	if (ref.table.empty()) {
-		return "";
-	}
-	return ", " + QuoteString(ref.table);
-}
-
-static std::string SchemaNamed(const TableRef &ref) {
-	if (ref.table.empty() || ref.schema.empty() || ref.schema == "main") {
-		return "";
-	}
-	return ", schema => " + QuoteString(ref.schema);
-}
-
 static void AppendCall(std::vector<MaintainRow> &rows, duckdb::ClientContext &context, const MaintainOptions &options,
                        const std::string &step, const std::string &action, const std::string &sql,
                        const std::string &schema, const std::string &table, const std::string &details) {
@@ -144,13 +130,9 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	    options.delete_older_than_set, options.delete_older_than,
 	    policy::ResolveOption(catalog_options, "delete_older_than", "", ""));
 
-	{
-		std::ostringstream sql;
-		sql << "CALL ducklake_flush_inlined_data(" << QuoteString(options.catalog) << TableArg(options.table)
-		    << SchemaNamed(options.table) << ")";
-		AppendCall(rows, context, options, "flush_inlined", "ducklake_flush_inlined_data", sql.str(),
-		           options.table.schema, options.table.table, "flush inlined rows before rewrite/merge");
-	}
+	AppendCall(rows, context, options, "flush_inlined", "ducklake_flush_inlined_data",
+	           FlushInlinedDataCall(options.catalog, options.table), options.table.schema, options.table.table,
+	           "flush inlined rows before rewrite/merge");
 	const bool flush_failed = HasStepStatus(rows, "flush_inlined", "error");
 
 	for (const auto &hint : hints) {
@@ -177,7 +159,7 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			continue;
 		}
 		std::ostringstream sql;
-		sql << "CALL ducklake_rewrite_data_files(" << QuoteString(options.catalog) << ", " << QuoteString(hint.table_name)
+		sql << "CALL ducklake_rewrite_data_files(" << QuoteString(options.catalog) << TableArg(ref)
 		    << SchemaNamed(ref) << ", delete_threshold => " << hint.rewrite_threshold << ")";
 		AppendCall(rows, context, options, "rewrite", "byte_weighted_ladder", sql.str(), hint.schema_name,
 		           hint.table_name, details.str());
@@ -247,8 +229,8 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 				}
 			}
 			std::ostringstream merge_sql;
-			merge_sql << "CALL ducklake_merge_adjacent_files(" << QuoteString(options.catalog) << ", "
-			          << QuoteString(hint.table_name) << SchemaNamed(ref) << ", min_file_size => " << tier.min_file_size
+			merge_sql << "CALL ducklake_merge_adjacent_files(" << QuoteString(options.catalog) << TableArg(ref)
+			          << SchemaNamed(ref) << ", min_file_size => " << tier.min_file_size
 			          << ", max_file_size => " << tier.max_file_size << ", max_compacted_files => " << cap << ")";
 			AppendCall(rows, context, options, "merge", std::string("tier_") + tier.name, merge_sql.str(),
 			           hint.schema_name, hint.table_name,

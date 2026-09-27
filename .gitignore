@@ -12,4 +12,6 @@ test/policy/test_options
 test/policy/test_options.exe
 test/policy/test_overrides
 test/policy/test_overrides.exe
+test/policy/test_sql
+test/policy/test_sql.exe
 
