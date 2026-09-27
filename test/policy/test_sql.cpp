@@ -54,6 +54,10 @@ static void TestRewriteMergeKeepPositionalTableAndSchema() {
 	       "rewrite/merge keep schema => for non-main schemas");
 	Expect(lakemon::SchemaNamed(lakemon::ParseTableRef("events")).empty(),
 	       "main schema is omitted for rewrite/merge");
+	Expect(lakemon::RewriteDataFilesCall("dlw", ref, 0.05) ==
+	           "CALL ducklake_rewrite_data_files('dlw', 'deal_chat_bridge', schema => 'dp_gold', "
+	           "delete_threshold => 0.05)",
+	       "rewrite CALL keeps positional table plus data-driven threshold");
 }
 
 int main() {

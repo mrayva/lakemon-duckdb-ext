@@ -119,16 +119,19 @@ static void TestTargetAndHintOverlay() {
 	FileStat file;
 	file.schema_name = "analytics";
 	file.table_name = "events";
+	file.data_file_id = 1;
 	file.file_size_bytes = 32 * kMiB;
 	file.record_count = 40000;
 	file.delete_count = 12000;
 	TableHint hint = SummarizeTable(std::vector<FileStat>(1, file));
-	Expect(hint.rewrite_threshold == 0.15, "ladder hot before overlay");
+	Expect(hint.rewrite_steps.size() == 1 && hint.rewrite_steps[0].band == "high", "12000 deletes → high band");
+	Expect(std::abs(hint.rewrite_threshold - 0.30) < 1e-9, "derived threshold is the file ratio");
 	ApplyNativeOptions(hint, rows);
+	Expect(hint.rewrite_steps.size() == 1 && hint.rewrite_steps[0].band == "catalog",
+	       "table catalog threshold collapses the plan");
 	Expect(std::abs(hint.rewrite_threshold - 0.15) < 1e-9, "table catalog threshold 0.15");
 	Expect(hint.target_file_size == "32MB", "schema target on hint");
 	Expect(hint.auto_compact, "analytics.events has no auto_compact=false");
-	Expect(hint.rewrite_rung == "hot", "rung stays ladder-classified");
 }
 
 int main() {

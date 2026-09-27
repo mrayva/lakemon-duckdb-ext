@@ -1,5 +1,6 @@
 #pragma once
 
+#include <sstream>
 #include <string>
 
 namespace lakemon {
@@ -79,6 +80,13 @@ inline std::string SchemaNamed(const TableRef &ref, const char *param = "schema"
 inline std::string FlushInlinedDataCall(const std::string &catalog, const TableRef &ref) {
 	return "CALL ducklake_flush_inlined_data(" + QuoteString(catalog) + TableArg(ref, "table_name") +
 	       SchemaNamed(ref, "schema_name") + ")";
+}
+
+inline std::string RewriteDataFilesCall(const std::string &catalog, const TableRef &ref, double delete_threshold) {
+	std::ostringstream sql;
+	sql << "CALL ducklake_rewrite_data_files(" << QuoteString(catalog) << TableArg(ref) << SchemaNamed(ref)
+	    << ", delete_threshold => " << delete_threshold << ")";
+	return sql.str();
 }
 
 } // namespace lakemon

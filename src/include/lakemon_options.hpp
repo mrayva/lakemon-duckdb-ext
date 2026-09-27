@@ -134,7 +134,8 @@ inline bool TryParseBool(const std::string &raw, bool &out) noexcept {
 }
 
 // Catalog rewrite_delete_threshold, when set, is the value passed to
-// ducklake_rewrite_data_files (operator configured once). Otherwise use the ladder.
+// ducklake_rewrite_data_files (operator configured once). ApplyNativeOptions
+// then collapses planned rungs to a single CALL. Otherwise use the ladder.
 inline double EffectiveRewriteThreshold(double ladder_threshold, const ResolvedOption &catalog) noexcept {
 	double catalog_value = 0;
 	if (catalog.found && TryParseDouble(catalog.value, catalog_value) && catalog_value >= 0.0 &&

@@ -2,7 +2,6 @@
 
 #include "lakemon_catalog.hpp"
 #include "lakemon_compat.hpp"
-#include "lakemon_pipeline.hpp"
 #include "lakemon_policy.hpp"
 #include "lakemon_store.hpp"
 
@@ -41,39 +40,45 @@ static int64_t CountResultRows(duckdb::ClientContext &context, const std::string
 
 static void AppendCall(std::vector<MaintainRow> &rows, duckdb::ClientContext &context, const MaintainOptions &options,
                        const std::string &step, const std::string &action, const std::string &sql,
-                       const std::string &schema, const std::string &table, const std::string &details) {
+                       const std::string &schema, const std::string &table, const std::string &details,
+                       int64_t processed = 0) {
 	if (options.dry_run) {
-		rows.push_back(MakeRow(step, schema, table, action, "planned", 0, 0, details + " | " + sql));
+		rows.push_back(MakeRow(step, schema, table, action, "planned", processed, 0, details + " | " + sql));
 		return;
 	}
 	try {
 		const int64_t created = CountResultRows(context, sql);
-		rows.push_back(MakeRow(step, schema, table, action, "ok", 0, created, details));
+		rows.push_back(MakeRow(step, schema, table, action, "ok", processed, created,
+		                       details + " | created=" + std::to_string(created)));
 	} catch (const duckdb::InterruptException &) {
 		throw;
 	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const Exception &ex) {
-		rows.push_back(MakeRow(step, schema, table, action, "error", 0, 0, SafeWhat(ex)));
+		rows.push_back(MakeRow(step, schema, table, action, "error", processed, 0, details + " | " + SafeWhat(ex)));
 	} catch (const std::exception &ex) {
-		rows.push_back(MakeRow(step, schema, table, action, "error", 0, 0, SafeWhat(ex)));
+		rows.push_back(MakeRow(step, schema, table, action, "error", processed, 0, details + " | " + SafeWhat(ex)));
 	}
 }
 
-static bool HasStepStatus(const std::vector<MaintainRow> &rows, const std::string &step, const std::string &status) {
-	for (const auto &row : rows) {
-		if (row.step == step && row.status == status) {
-			return true;
-		}
+static void AppendRewriteSkips(std::vector<MaintainRow> &rows, const policy::TableHint &hint, const std::string &reason) {
+	if (hint.rewrite_steps.empty()) {
+		rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "none", "skip",
+		                       static_cast<int64_t>(hint.file_count), 0, reason));
+		return;
 	}
-	return false;
+	for (const auto &step : hint.rewrite_steps) {
+		rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, step.band, "skip",
+		                       static_cast<int64_t>(step.files.size()), 0,
+		                       policy::FormatRewriteStepDetails(step) + " | " + reason));
+	}
 }
 
-// Inventory failure: status=error row(s), then stop (do not CALL rewrite/merge
+// Inventory hard-failure: status=error row(s), then stop (do not CALL rewrite/merge
 // against an unread catalog). Unread per-table metadata: status=error diagnostic
-// rows; continue with tables that were read. flush_inlined failure: rewrite and
-// merge are skipped (status=skip). expire/cleanup are independent and still run
-// after a flush/rewrite/merge error. InterruptException and bad_alloc rethrow.
+// rows; continue with tables that were read. After inventory succeeds, flush,
+// rewrite, merge, expire, and cleanup are independent: a flush_inlined error is
+// recorded and rewrite/merge still run. InterruptException and bad_alloc rethrow.
 // The session stays usable.
 std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const MaintainOptions &options) {
 	std::vector<MaintainRow> rows;
@@ -115,7 +120,7 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	}
 
 	rows.push_back(MakeRow("inventory", "", "", "catalog_select", "ok", static_cast<int64_t>(files.size()),
-	                       static_cast<int64_t>(hints.size()), "byte_weighted rewrite ladder + merge size bands"));
+	                       static_cast<int64_t>(hints.size()), "adaptive delete-count rewrite ladder + merge size bands"));
 	if (!options_error.empty()) {
 		rows.push_back(MakeRow("catalog_options", "", "", "ducklake_options", "error", 0, 0, options_error));
 	}
@@ -134,36 +139,25 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	AppendCall(rows, context, options, "flush_inlined", "ducklake_flush_inlined_data",
 	           FlushInlinedDataCall(options.catalog, options.table), options.table.schema, options.table.table,
 	           "flush inlined rows before rewrite/merge");
-	const bool flush_failed = HasStepStatus(rows, "flush_inlined", "error");
 
 	for (const auto &hint : hints) {
 		TableRef ref;
 		ref.schema = hint.schema_name;
 		ref.table = hint.table_name;
-		std::ostringstream details;
-		details << "rung=" << hint.rewrite_rung << " threshold=" << hint.rewrite_threshold
-		        << " deleted_bytes=" << hint.deleted_bytes_weighted;
-		if (flush_failed && StepDependsOnFlush("rewrite")) {
-			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, SkipReasonFlushFailed()));
-			continue;
-		}
 		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
-			details << " auto_compact=false";
-			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, details.str()));
+			AppendRewriteSkips(rows, hint, "auto_compact=false");
 			continue;
 		}
-		if (hint.rewrite_rung == "none" || hint.deleted_bytes_weighted == 0) {
-			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, details.str()));
+		if (hint.rewrite_steps.empty()) {
+			AppendRewriteSkips(rows, hint, hint.rewrite_plan);
 			continue;
 		}
-		std::ostringstream sql;
-		sql << "CALL ducklake_rewrite_data_files(" << QuoteString(options.catalog) << TableArg(ref)
-		    << SchemaNamed(ref) << ", delete_threshold => " << hint.rewrite_threshold << ")";
-		AppendCall(rows, context, options, "rewrite", "byte_weighted_ladder", sql.str(), hint.schema_name,
-		           hint.table_name, details.str());
+		for (const auto &step : hint.rewrite_steps) {
+			AppendCall(rows, context, options, "rewrite", step.band,
+			           RewriteDataFilesCall(options.catalog, ref, step.delete_threshold), hint.schema_name,
+			           hint.table_name, policy::FormatRewriteStepDetails(step),
+			           static_cast<int64_t>(step.files.size()));
+		}
 	}
 
 	for (const auto &hint : hints) {
@@ -175,11 +169,6 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			if (file.schema_name == hint.schema_name && file.table_name == hint.table_name) {
 				table_files.push_back(file);
 			}
-		}
-		if (flush_failed && StepDependsOnFlush("merge")) {
-			rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name, "adjacent_files", "skip",
-			                       static_cast<int64_t>(hint.file_count), 0, SkipReasonFlushFailed()));
-			continue;
 		}
 		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
 			rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name, "auto_compact", "skip",

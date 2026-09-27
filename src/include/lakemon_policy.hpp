@@ -1,11 +1,13 @@
 // Standalone policy for DuckLake maintain orchestration.
-// Header-only so the rewrite ladder and merge tiers can be tested without DuckDB.
+// Header-only so the adaptive rewrite ladder and merge tiers can be tested
+// without DuckDB.
 #pragma once
 
 #include "lakemon_options.hpp"
 
 #include <algorithm>
 #include <cstdint>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -14,8 +16,9 @@ namespace policy {
 
 constexpr uint64_t kMiB = 1024ULL * 1024ULL;
 
-static constexpr const char *kKindRewriteRung = "rewrite_rung";
+static constexpr const char *kKindRewriteLadder = "rewrite_ladder";
 static constexpr const char *kKindMergeTier = "merge_tier";
+static constexpr const char *kLadderName = "default";
 static constexpr const char *kSourceDefault = "default";
 static constexpr const char *kSourceOverride = "override";
 
@@ -29,14 +32,26 @@ struct FileStat {
 	uint64_t delete_file_size_bytes = 0;
 };
 
-struct RewriteRung {
-	std::string name;
-	// First matching rung wins (most aggressive first). Not equal-width ratio buckets.
-	uint64_t min_delete_count;
-	uint64_t min_deleted_bytes;
-	double min_delete_ratio;
-	double rewrite_threshold;
+// Absolute delete-count floors for High → Medium → Low rungs. Thresholds are
+// derived per maintain pass from the files in each band, not stored here.
+struct DeleteCountLadder {
+	uint64_t high_min = 10000;
+	uint64_t medium_min = 1000;
+	uint64_t low_min = 100;
+	// 0 = unset. Size is never the bucket key; budget only trims a band.
+	uint64_t byte_budget = 0;
+	uint64_t max_rewrite_steps = 3;
 };
+
+enum class DeleteBand { High = 0, Medium = 1, Low = 2 };
+
+static_assert(static_cast<int>(DeleteBand::High) == 0, "groups[0] is High");
+static_assert(static_cast<int>(DeleteBand::Medium) == 1, "groups[1] is Medium");
+static_assert(static_cast<int>(DeleteBand::Low) == 2, "groups[2] is Low");
+
+inline int DeleteBandIndex(DeleteBand band) {
+	return static_cast<int>(band);
+}
 
 struct MergeTier {
 	std::string name;
@@ -46,30 +61,33 @@ struct MergeTier {
 	uint64_t max_compacted_files;
 };
 
-// One persisted override row. A write stores the full effective rung or tier.
+// One persisted override row. A write stores the full effective ladder or tier.
 struct StoredPolicyRow {
 	std::string kind;
 	std::string name;
-	uint64_t min_delete_count = 0;
-	uint64_t min_deleted_bytes = 0;
-	double min_delete_ratio = 0.0;
-	double rewrite_threshold = 0.0;
 	uint64_t min_file_size = 0;
 	uint64_t max_file_size = 0;
 	std::string target_file_size;
 	uint64_t max_compacted_files = 0;
+	uint64_t high_min = 0;
+	uint64_t medium_min = 0;
+	uint64_t low_min = 0;
+	uint64_t byte_budget = 0;
+	uint64_t max_rewrite_steps = 0;
 };
 
 // Sparse field patch from CALL lakemon_set_policy named parameters.
 struct PolicyFieldPatch {
-	bool set_min_delete_count = false;
-	uint64_t min_delete_count = 0;
-	bool set_min_deleted_bytes = false;
-	uint64_t min_deleted_bytes = 0;
-	bool set_min_delete_ratio = false;
-	double min_delete_ratio = 0.0;
-	bool set_rewrite_threshold = false;
-	double rewrite_threshold = 0.0;
+	bool set_high_min = false;
+	uint64_t high_min = 0;
+	bool set_medium_min = false;
+	uint64_t medium_min = 0;
+	bool set_low_min = false;
+	uint64_t low_min = 0;
+	bool set_byte_budget = false;
+	uint64_t byte_budget = 0;
+	bool set_max_rewrite_steps = false;
+	uint64_t max_rewrite_steps = 0;
 	bool set_min_file_size = false;
 	uint64_t min_file_size = 0;
 	bool set_max_file_size = false;
@@ -82,13 +100,21 @@ struct PolicyFieldPatch {
 };
 
 struct ActivePolicy {
-	std::vector<RewriteRung> ladder;
+	DeleteCountLadder rewrite;
 	std::vector<MergeTier> tiers;
 	std::vector<std::string> overridden_keys;
 };
 
-// Byte-weighted deleted payload: prefer actual delete_count * mean row size,
-// fall back to delete-file bytes when row count is unknown.
+// One rewrite CALL: files that share a delete-count band.
+struct PlannedRewriteStep {
+	std::string band;
+	std::vector<FileStat> files;
+	double delete_threshold = 0.0;
+	uint64_t planned_bytes = 0;
+	uint64_t planned_deletes = 0;
+};
+
+// Byte-weighted deleted payload for table stats (not a bucket key).
 inline uint64_t DeletedBytes(const FileStat &file) {
 	if (file.record_count > 0 && file.delete_count > 0) {
 		const double ratio =
@@ -105,16 +131,40 @@ inline double DeleteRatio(const FileStat &file) {
 	return std::min(1.0, static_cast<double>(file.delete_count) / static_cast<double>(file.record_count));
 }
 
-// Default rewrite ladder. Rungs consider delete *count* and byte-weighted mass
-// instead of slicing files into equal ratio buckets (0-25 / 25-50 / ...).
-inline const std::vector<RewriteRung> &DefaultRewriteLadder() {
-	static const std::vector<RewriteRung> kLadder = {
-	    {"hot", 10000, 8 * kMiB, 0.15, 0.15},
-	    {"warm", 1000, 1 * kMiB, 0.15, 0.40},
-	    {"cool", 100, 256 * 1024ULL, 0.50, 0.80},
-	    {"default", 1, 1, 0.95, 0.95},
-	};
-	return kLadder;
+inline const char *DeleteBandName(DeleteBand band) {
+	switch (band) {
+	case DeleteBand::High:
+		return "high";
+	case DeleteBand::Medium:
+		return "medium";
+	case DeleteBand::Low:
+		return "low";
+	}
+	return "none";
+}
+
+inline bool ValidateDeleteCountLadder(const DeleteCountLadder &ladder, std::string &error) {
+	if (ladder.low_min < 1) {
+		error = "lakemon: rewrite ladder low_min must be >= 1 (zero would include clean files)";
+		return false;
+	}
+	if (ladder.high_min <= ladder.medium_min) {
+		error = "lakemon: rewrite ladder high_min must be > medium_min";
+		return false;
+	}
+	if (ladder.medium_min <= ladder.low_min) {
+		error = "lakemon: rewrite ladder medium_min must be > low_min";
+		return false;
+	}
+	if (ladder.max_rewrite_steps < 1) {
+		error = "lakemon: max_rewrite_steps must be >= 1";
+		return false;
+	}
+	return true;
+}
+
+inline DeleteCountLadder DefaultRewriteLadder() {
+	return DeleteCountLadder();
 }
 
 // Merge size bands inspired by common DuckLake maintain patterns (streaming
@@ -130,7 +180,7 @@ inline const std::vector<MergeTier> &DefaultMergeTiers() {
 
 inline ActivePolicy DefaultPolicy() {
 	ActivePolicy policy;
-	policy.ladder = DefaultRewriteLadder();
+	policy.rewrite = DefaultRewriteLadder();
 	policy.tiers = DefaultMergeTiers();
 	return policy;
 }
@@ -171,22 +221,6 @@ inline bool InUnitInterval(double value) noexcept {
 	return value >= 0.0 && value <= 1.0;
 }
 
-inline bool ValidateRewriteRung(const RewriteRung &rung, std::string &error) {
-	if (rung.name.empty()) {
-		error = "lakemon: rewrite rung name is required";
-		return false;
-	}
-	if (!InUnitInterval(rung.min_delete_ratio)) {
-		error = "lakemon: min_delete_ratio must be between 0 and 1";
-		return false;
-	}
-	if (!InUnitInterval(rung.rewrite_threshold)) {
-		error = "lakemon: rewrite_threshold must be between 0 and 1";
-		return false;
-	}
-	return true;
-}
-
 inline bool ValidateMergeTier(const MergeTier &tier, std::string &error) {
 	if (tier.name.empty()) {
 		error = "lakemon: merge tier name is required";
@@ -205,24 +239,6 @@ inline bool ValidateMergeTier(const MergeTier &tier, std::string &error) {
 		return false;
 	}
 	return true;
-}
-
-inline RewriteRung *FindRewriteRung(ActivePolicy &policy, const std::string &name) {
-	for (auto &rung : policy.ladder) {
-		if (EqualsCI(rung.name, name)) {
-			return &rung;
-		}
-	}
-	return nullptr;
-}
-
-inline const RewriteRung *FindRewriteRung(const ActivePolicy &policy, const std::string &name) {
-	for (const auto &rung : policy.ladder) {
-		if (EqualsCI(rung.name, name)) {
-			return &rung;
-		}
-	}
-	return nullptr;
 }
 
 inline MergeTier *FindMergeTier(ActivePolicy &policy, const std::string &name) {
@@ -244,26 +260,40 @@ inline const MergeTier *FindMergeTier(const ActivePolicy &policy, const std::str
 }
 
 inline bool KnownPolicyKind(const std::string &kind) noexcept {
-	return EqualsCI(kind, kKindRewriteRung) || EqualsCI(kind, kKindMergeTier);
+	return EqualsCI(kind, kKindRewriteLadder) || EqualsCI(kind, kKindMergeTier);
 }
 
 inline bool NormalizePolicyKind(const std::string &kind, std::string &canonical, std::string &error) {
-	if (EqualsCI(kind, kKindRewriteRung)) {
-		canonical = kKindRewriteRung;
+	if (EqualsCI(kind, kKindRewriteLadder)) {
+		canonical = kKindRewriteLadder;
 		return true;
 	}
 	if (EqualsCI(kind, kKindMergeTier)) {
 		canonical = kKindMergeTier;
 		return true;
 	}
-	error = "lakemon: kind must be rewrite_rung or merge_tier";
+	error = "lakemon: kind must be rewrite_ladder or merge_tier";
 	return false;
 }
 
+inline bool IsRewriteLadderName(const std::string &name) noexcept {
+	return EqualsCI(name, kLadderName);
+}
+
 inline bool PatchHasField(const PolicyFieldPatch &patch) noexcept {
-	return patch.set_min_delete_count || patch.set_min_deleted_bytes || patch.set_min_delete_ratio ||
-	       patch.set_rewrite_threshold || patch.set_min_file_size || patch.set_max_file_size ||
+	return patch.set_high_min || patch.set_medium_min || patch.set_low_min || patch.set_byte_budget ||
+	       patch.set_max_rewrite_steps || patch.set_min_file_size || patch.set_max_file_size ||
 	       patch.set_target_file_size || patch.set_max_compacted_files;
+}
+
+inline bool PatchHasRewriteField(const PolicyFieldPatch &patch) noexcept {
+	return patch.set_high_min || patch.set_medium_min || patch.set_low_min || patch.set_byte_budget ||
+	       patch.set_max_rewrite_steps;
+}
+
+inline bool PatchHasMergeField(const PolicyFieldPatch &patch) noexcept {
+	return patch.set_min_file_size || patch.set_max_file_size || patch.set_target_file_size ||
+	       patch.set_max_compacted_files;
 }
 
 inline bool ResetNamedPolicy(ActivePolicy &policy, const std::string &kind, const std::string &name,
@@ -272,21 +302,13 @@ inline bool ResetNamedPolicy(ActivePolicy &policy, const std::string &kind, cons
 	if (!NormalizePolicyKind(kind, canonical, error)) {
 		return false;
 	}
-	if (canonical == kKindRewriteRung) {
-		const RewriteRung *def = nullptr;
-		for (const auto &rung : DefaultRewriteLadder()) {
-			if (EqualsCI(rung.name, name)) {
-				def = &rung;
-				break;
-			}
-		}
-		RewriteRung *cur = FindRewriteRung(policy, name);
-		if (!def || !cur) {
-			error = "lakemon: unknown rewrite rung '" + name + "'";
+	if (canonical == kKindRewriteLadder) {
+		if (!IsRewriteLadderName(name)) {
+			error = "lakemon: unknown rewrite ladder '" + name + "'";
 			return false;
 		}
-		*cur = *def;
-		ClearOverridden(policy, canonical, cur->name);
+		policy.rewrite = DefaultRewriteLadder();
+		ClearOverridden(policy, canonical, kLadderName);
 		return true;
 	}
 	const MergeTier *def = nullptr;
@@ -306,9 +328,8 @@ inline bool ResetNamedPolicy(ActivePolicy &policy, const std::string &kind, cons
 	return true;
 }
 
-// Apply a sparse CALL patch onto the named built-in rung or tier. Unknown names
-// are rejected so classification order stays hot/warm/cool/default and
-// micro/small/medium.
+// Apply a sparse CALL patch onto the rewrite ladder or a named merge tier.
+// Rewrite name must be "default". Merge names stay micro/small/medium.
 inline bool ApplyPolicyPatch(ActivePolicy &policy, const std::string &kind, const std::string &name,
                              const PolicyFieldPatch &patch, std::string &error) {
 	std::string canonical;
@@ -326,35 +347,36 @@ inline bool ApplyPolicyPatch(ActivePolicy &policy, const std::string &kind, cons
 		error = "lakemon: set_policy requires at least one field or reset => true";
 		return false;
 	}
-	if (canonical == kKindRewriteRung) {
-		RewriteRung *rung = FindRewriteRung(policy, name);
-		if (!rung) {
-			error = "lakemon: unknown rewrite rung '" + name + "'";
+	if (canonical == kKindRewriteLadder) {
+		if (!IsRewriteLadderName(name)) {
+			error = "lakemon: unknown rewrite ladder '" + name + "'";
 			return false;
 		}
-		if (patch.set_min_file_size || patch.set_max_file_size || patch.set_target_file_size ||
-		    patch.set_max_compacted_files) {
-			error = "lakemon: merge-tier fields are not valid for rewrite_rung";
+		if (PatchHasMergeField(patch)) {
+			error = "lakemon: merge-tier fields are not valid for rewrite_ladder";
 			return false;
 		}
-		RewriteRung next = *rung;
-		if (patch.set_min_delete_count) {
-			next.min_delete_count = patch.min_delete_count;
+		DeleteCountLadder next = policy.rewrite;
+		if (patch.set_high_min) {
+			next.high_min = patch.high_min;
 		}
-		if (patch.set_min_deleted_bytes) {
-			next.min_deleted_bytes = patch.min_deleted_bytes;
+		if (patch.set_medium_min) {
+			next.medium_min = patch.medium_min;
 		}
-		if (patch.set_min_delete_ratio) {
-			next.min_delete_ratio = patch.min_delete_ratio;
+		if (patch.set_low_min) {
+			next.low_min = patch.low_min;
 		}
-		if (patch.set_rewrite_threshold) {
-			next.rewrite_threshold = patch.rewrite_threshold;
+		if (patch.set_byte_budget) {
+			next.byte_budget = patch.byte_budget;
 		}
-		if (!ValidateRewriteRung(next, error)) {
+		if (patch.set_max_rewrite_steps) {
+			next.max_rewrite_steps = patch.max_rewrite_steps;
+		}
+		if (!ValidateDeleteCountLadder(next, error)) {
 			return false;
 		}
-		*rung = next;
-		MarkOverridden(policy, canonical, rung->name);
+		policy.rewrite = next;
+		MarkOverridden(policy, canonical, kLadderName);
 		return true;
 	}
 	MergeTier *tier = FindMergeTier(policy, name);
@@ -362,9 +384,8 @@ inline bool ApplyPolicyPatch(ActivePolicy &policy, const std::string &kind, cons
 		error = "lakemon: unknown merge tier '" + name + "'";
 		return false;
 	}
-	if (patch.set_min_delete_count || patch.set_min_deleted_bytes || patch.set_min_delete_ratio ||
-	    patch.set_rewrite_threshold) {
-		error = "lakemon: rewrite-rung fields are not valid for merge_tier";
+	if (PatchHasRewriteField(patch)) {
+		error = "lakemon: rewrite-ladder fields are not valid for merge_tier";
 		return false;
 	}
 	MergeTier next = *tier;
@@ -388,14 +409,15 @@ inline bool ApplyPolicyPatch(ActivePolicy &policy, const std::string &kind, cons
 	return true;
 }
 
-inline StoredPolicyRow RowFromRung(const RewriteRung &rung) {
+inline StoredPolicyRow RowFromLadder(const DeleteCountLadder &ladder) {
 	StoredPolicyRow row;
-	row.kind = kKindRewriteRung;
-	row.name = rung.name;
-	row.min_delete_count = rung.min_delete_count;
-	row.min_deleted_bytes = rung.min_deleted_bytes;
-	row.min_delete_ratio = rung.min_delete_ratio;
-	row.rewrite_threshold = rung.rewrite_threshold;
+	row.kind = kKindRewriteLadder;
+	row.name = kLadderName;
+	row.high_min = ladder.high_min;
+	row.medium_min = ladder.medium_min;
+	row.low_min = ladder.low_min;
+	row.byte_budget = ladder.byte_budget;
+	row.max_rewrite_steps = ladder.max_rewrite_steps;
 	return row;
 }
 
@@ -415,22 +437,22 @@ inline bool OverlayStoredRow(ActivePolicy &policy, const StoredPolicyRow &row, s
 	if (!NormalizePolicyKind(row.kind, canonical, error)) {
 		return false;
 	}
-	if (canonical == kKindRewriteRung) {
-		RewriteRung *rung = FindRewriteRung(policy, row.name);
-		if (!rung) {
-			error = "lakemon: unknown rewrite rung '" + row.name + "'";
+	if (canonical == kKindRewriteLadder) {
+		if (!IsRewriteLadderName(row.name)) {
+			error = "lakemon: unknown rewrite ladder '" + row.name + "'";
 			return false;
 		}
-		RewriteRung next = *rung;
-		next.min_delete_count = row.min_delete_count;
-		next.min_deleted_bytes = row.min_deleted_bytes;
-		next.min_delete_ratio = row.min_delete_ratio;
-		next.rewrite_threshold = row.rewrite_threshold;
-		if (!ValidateRewriteRung(next, error)) {
+		DeleteCountLadder next;
+		next.high_min = row.high_min;
+		next.medium_min = row.medium_min;
+		next.low_min = row.low_min;
+		next.byte_budget = row.byte_budget;
+		next.max_rewrite_steps = row.max_rewrite_steps == 0 ? 3 : row.max_rewrite_steps;
+		if (!ValidateDeleteCountLadder(next, error)) {
 			return false;
 		}
-		*rung = next;
-		MarkOverridden(policy, canonical, rung->name);
+		policy.rewrite = next;
+		MarkOverridden(policy, canonical, kLadderName);
 		return true;
 	}
 	MergeTier *tier = FindMergeTier(policy, row.name);
@@ -466,58 +488,168 @@ inline ActivePolicy OverlayStoredRows(const std::vector<StoredPolicyRow> &rows, 
 	return policy;
 }
 
-inline double FallbackRewriteThreshold(const std::vector<RewriteRung> &ladder) {
-	if (ladder.empty()) {
-		return 0.95;
+inline bool AssignDeleteBand(uint64_t delete_count, const DeleteCountLadder &ladder, DeleteBand &out) {
+	if (delete_count >= ladder.high_min) {
+		out = DeleteBand::High;
+		return true;
 	}
-	return ladder.back().rewrite_threshold;
+	if (delete_count >= ladder.medium_min) {
+		out = DeleteBand::Medium;
+		return true;
+	}
+	if (delete_count >= ladder.low_min) {
+		out = DeleteBand::Low;
+		return true;
+	}
+	return false;
 }
 
-inline const RewriteRung *ClassifyRewrite(const FileStat &file, const std::vector<RewriteRung> &ladder) {
-	const uint64_t deleted_bytes = DeletedBytes(file);
-	const double ratio = DeleteRatio(file);
-	for (const auto &rung : ladder) {
-		const bool count_hit = file.delete_count >= rung.min_delete_count && ratio >= rung.min_delete_ratio;
-		const bool byte_hit = deleted_bytes >= rung.min_deleted_bytes && ratio >= rung.min_delete_ratio;
-		if (count_hit || byte_hit) {
-			return &rung;
+inline std::vector<FileStat> TakeWithinBudget(std::vector<FileStat> files, uint64_t byte_budget) {
+	if (byte_budget == 0) {
+		return files;
+	}
+	std::vector<FileStat> chosen;
+	uint64_t used = 0;
+	for (auto &file : files) {
+		uint64_t next = used;
+		if (file.file_size_bytes > ~static_cast<uint64_t>(0) - used) {
+			next = ~static_cast<uint64_t>(0);
+		} else {
+			next = used + file.file_size_bytes;
+		}
+		if (chosen.empty() || next <= byte_budget) {
+			used = next;
+			chosen.push_back(std::move(file));
 		}
 	}
-	return nullptr;
+	return chosen;
 }
 
-inline const RewriteRung *ClassifyRewrite(const FileStat &file) {
-	return ClassifyRewrite(file, DefaultRewriteLadder());
-}
-
-// Choose one table-level rewrite threshold from byte-weighted mass, not from
-// an equal-count vote across files.
-inline double SelectRewriteThreshold(const std::vector<FileStat> &files, const std::vector<RewriteRung> &ladder) {
-	uint64_t total_deleted = 0;
+inline bool FinishRewriteRung(DeleteBand band, std::vector<FileStat> files, uint64_t byte_budget,
+                              PlannedRewriteStep &out) {
+	if (files.empty()) {
+		return false;
+	}
+	std::sort(files.begin(), files.end(), [](const FileStat &a, const FileStat &b) {
+		if (a.delete_count != b.delete_count) {
+			return a.delete_count > b.delete_count;
+		}
+		if (a.file_size_bytes != b.file_size_bytes) {
+			return a.file_size_bytes > b.file_size_bytes;
+		}
+		return a.data_file_id < b.data_file_id;
+	});
+	files = TakeWithinBudget(std::move(files), byte_budget);
+	if (files.empty()) {
+		return false;
+	}
+	double threshold = 1.0;
+	uint64_t planned_bytes = 0;
+	uint64_t planned_deletes = 0;
 	for (const auto &file : files) {
-		total_deleted += DeletedBytes(file);
+		threshold = std::min(threshold, DeleteRatio(file));
+		planned_bytes += file.file_size_bytes;
+		planned_deletes += file.delete_count;
 	}
-	if (total_deleted == 0) {
-		return FallbackRewriteThreshold(ladder);
-	}
-	for (const auto &rung : ladder) {
-		uint64_t rung_mass = 0;
-		for (const auto &file : files) {
-			const auto *classified = ClassifyRewrite(file, ladder);
-			if (classified && classified->name == rung.name) {
-				rung_mass += DeletedBytes(file);
-			}
-		}
-		// Material rung: at least 25% of deleted bytes, or the rung's own floor.
-		if (rung_mass >= rung.min_deleted_bytes && rung_mass * 4 >= total_deleted) {
-			return rung.rewrite_threshold;
-		}
-	}
-	return FallbackRewriteThreshold(ladder);
+	out.band = DeleteBandName(band);
+	out.files = std::move(files);
+	out.delete_threshold = threshold;
+	out.planned_bytes = planned_bytes;
+	out.planned_deletes = planned_deletes;
+	return true;
 }
 
-inline double SelectRewriteThreshold(const std::vector<FileStat> &files) {
-	return SelectRewriteThreshold(files, DefaultRewriteLadder());
+// Bucket files by absolute delete_count (High → Medium → Low). Rank inside a
+// band by delete_count desc, then file_size_bytes desc. Bytes never form
+// buckets. Each rung's delete_threshold is the minimum delete_ratio so the
+// native CALL can reach those files. Invalid ladders fail closed (no rungs).
+inline std::vector<PlannedRewriteStep> PlanRewriteRungs(const std::vector<FileStat> &files,
+                                                        const DeleteCountLadder &ladder,
+                                                        std::string *error_out = nullptr) {
+	std::string error;
+	if (!ValidateDeleteCountLadder(ladder, error)) {
+		if (error_out) {
+			*error_out = error;
+		}
+		return {};
+	}
+	std::vector<FileStat> groups[3];
+	for (const auto &file : files) {
+		DeleteBand band;
+		if (AssignDeleteBand(file.delete_count, ladder, band)) {
+			groups[DeleteBandIndex(band)].push_back(file);
+		}
+	}
+	const DeleteBand order[3] = {DeleteBand::High, DeleteBand::Medium, DeleteBand::Low};
+	std::vector<PlannedRewriteStep> rungs;
+	for (int i = 0; i < 3; i++) {
+		PlannedRewriteStep step;
+		if (FinishRewriteRung(order[i], std::move(groups[i]), ladder.byte_budget, step)) {
+			rungs.push_back(std::move(step));
+		}
+	}
+	if (rungs.size() > ladder.max_rewrite_steps) {
+		rungs.resize(static_cast<std::vector<PlannedRewriteStep>::size_type>(ladder.max_rewrite_steps));
+	}
+	return rungs;
+}
+
+inline std::vector<PlannedRewriteStep> PlanRewriteRungs(const std::vector<FileStat> &files) {
+	return PlanRewriteRungs(files, DefaultRewriteLadder());
+}
+
+inline std::string FormatRewriteStepDetails(const PlannedRewriteStep &step) {
+	std::ostringstream out;
+	out << "band=" << step.band << " delete_threshold=" << step.delete_threshold
+	    << " planned_files=" << step.files.size() << " planned_bytes=" << step.planned_bytes
+	    << " planned_deletes=" << step.planned_deletes;
+	return out.str();
+}
+
+inline std::string FormatRewritePlan(const std::vector<PlannedRewriteStep> &steps) {
+	if (steps.empty()) {
+		return "none";
+	}
+	std::ostringstream out;
+	for (std::vector<PlannedRewriteStep>::size_type i = 0; i < steps.size(); i++) {
+		if (i > 0) {
+			out << "; ";
+		}
+		out << FormatRewriteStepDetails(steps[i]);
+	}
+	return out.str();
+}
+
+// One maintain result row per planned rewrite CALL. Tests use this so dry_run
+// / execute rows stay self-explanatory without a live DuckLake session.
+struct RewriteRowPreview {
+	std::string action;
+	int64_t files_processed = 0;
+	std::string details;
+};
+
+inline std::vector<RewriteRowPreview> PreviewRewriteRows(const std::vector<PlannedRewriteStep> &steps) {
+	std::vector<RewriteRowPreview> rows;
+	for (const auto &step : steps) {
+		RewriteRowPreview row;
+		row.action = step.band;
+		row.files_processed = static_cast<int64_t>(step.files.size());
+		row.details = FormatRewriteStepDetails(step);
+		rows.push_back(std::move(row));
+	}
+	return rows;
+}
+
+inline std::string FormatRewriteLadderNotes(const DeleteCountLadder &ladder) {
+	std::ostringstream out;
+	out << "medium_min=" << ladder.medium_min << "; low_min=" << ladder.low_min << "; byte_budget=";
+	if (ladder.byte_budget == 0) {
+		out << "none";
+	} else {
+		out << ladder.byte_budget;
+	}
+	out << "; max_rewrite_steps=" << ladder.max_rewrite_steps;
+	return out.str();
 }
 
 inline const MergeTier *ClassifyMerge(const FileStat &file, const std::vector<MergeTier> &tiers) {
@@ -547,19 +679,45 @@ struct TableHint {
 	uint64_t delete_count = 0;
 	uint64_t deleted_bytes_weighted = 0;
 	double delete_ratio = 0.0;
-	double rewrite_threshold = 0.95;
-	std::string rewrite_rung = "none";
+	std::vector<PlannedRewriteStep> rewrite_steps;
+	std::string rewrite_plan = "none";
+	double rewrite_threshold = 0.0;
 	std::string merge_tier_hint = "none";
 	std::string target_file_size;
 	bool auto_compact = true;
 };
 
+inline void RefreshRewritePlan(TableHint &hint) {
+	hint.rewrite_plan = FormatRewritePlan(hint.rewrite_steps);
+	hint.rewrite_threshold = hint.rewrite_steps.empty() ? 0.0 : hint.rewrite_steps.front().delete_threshold;
+}
+
 // Overlay native DuckLake options (table → schema → global) on a table hint.
-// Ladder rung is unchanged; rewrite_threshold becomes the effective CALL value.
+// rewrite_delete_threshold, when set, is a FULL override: one band=catalog CALL
+// with that threshold. max_rewrite_steps and per-rung byte_budget do not apply
+// after collapse (they already shaped the planned rungs; collapse does not
+// re-budget or emit extra CALLs). Files below low_min were filtered before
+// collapse and stay out. auto_compact is honored by maintain.
 inline void ApplyNativeOptions(TableHint &hint, const std::vector<OptionBinding> &options) {
 	const ResolvedOption rewrite =
 	    ResolveOption(options, "rewrite_delete_threshold", hint.schema_name, hint.table_name);
-	hint.rewrite_threshold = EffectiveRewriteThreshold(hint.rewrite_threshold, rewrite);
+	double catalog_value = 0;
+	if (rewrite.found && TryParseDouble(rewrite.value, catalog_value) && InUnitInterval(catalog_value) &&
+	    !hint.rewrite_steps.empty()) {
+		PlannedRewriteStep step;
+		step.band = "catalog";
+		step.delete_threshold = catalog_value;
+		for (const auto &existing : hint.rewrite_steps) {
+			for (const auto &file : existing.files) {
+				step.files.push_back(file);
+				step.planned_bytes += file.file_size_bytes;
+				step.planned_deletes += file.delete_count;
+			}
+		}
+		hint.rewrite_steps.clear();
+		hint.rewrite_steps.push_back(std::move(step));
+	}
+	RefreshRewritePlan(hint);
 	const ResolvedOption compact = ResolveOption(options, "auto_compact", hint.schema_name, hint.table_name);
 	hint.auto_compact = EffectiveAutoCompact(compact);
 	const ResolvedOption target = ResolveOption(options, "target_file_size", hint.schema_name, hint.table_name);
@@ -595,13 +753,8 @@ inline TableHint SummarizeTable(const std::vector<FileStat> &files, const Active
 		}
 	}
 	hint.delete_ratio = records == 0 ? 0.0 : std::min(1.0, static_cast<double>(hint.delete_count) / static_cast<double>(records));
-	hint.rewrite_threshold = SelectRewriteThreshold(files, policy.ladder);
-	for (const auto &rung : policy.ladder) {
-		if (rung.rewrite_threshold == hint.rewrite_threshold) {
-			hint.rewrite_rung = rung.name;
-			break;
-		}
-	}
+	hint.rewrite_steps = PlanRewriteRungs(files, policy.rewrite);
+	RefreshRewritePlan(hint);
 	for (std::vector<MergeTier>::size_type i = 0; i < policy.tiers.size(); i++) {
 		if (merge_counts[i] >= 2ULL) {
 			hint.merge_tier_hint = policy.tiers[i].name;
