@@ -15,7 +15,8 @@ include_directories(src/include)
 set(EXTENSION_SOURCES
     src/lakemon_extension.cpp
     src/lakemon_catalog.cpp
-    src/lakemon_maintain.cpp)
+    src/lakemon_maintain.cpp
+    src/lakemon_store.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

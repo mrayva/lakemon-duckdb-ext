@@ -5,6 +5,7 @@
 #include "lakemon_compat.hpp"
 #include "lakemon_maintain.hpp"
 #include "lakemon_policy.hpp"
+#include "lakemon_store.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
@@ -34,7 +35,17 @@ struct StatsBindData : public TableFunctionData {
 	lakemon::TableRef table;
 };
 
-struct PolicyBindData : public TableFunctionData {};
+struct PolicyBindData : public TableFunctionData {
+	string catalog;
+};
+
+struct SetPolicyBindData : public TableFunctionData {
+	string catalog;
+	string kind;
+	string name;
+	lakemon::policy::PolicyFieldPatch patch;
+	bool reset_all = false;
+};
 
 struct RowState : public GlobalTableFunctionState {
 	vector<vector<Value>> rows;
@@ -213,29 +224,223 @@ static unique_ptr<GlobalTableFunctionState> StatsInit(ClientContext &context, Ta
 	return std::move(state);
 }
 
-static unique_ptr<FunctionData> PolicyBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
-                                           lakemon::ColumnNameList &names) {
-	names = {"kind", "name", "min_value", "max_value", "threshold_or_target", "notes"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+static void PolicyReturnTypes(vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
+	names = {"kind", "name", "min_value", "max_value", "threshold_or_target", "notes", "source"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
-	return make_uniq<PolicyBindData>();
 }
 
-static unique_ptr<GlobalTableFunctionState> PolicyInit(ClientContext &, TableFunctionInitInput &) {
-	auto state = make_uniq<RowState>();
-	for (const auto &rung : lakemon::policy::DefaultRewriteLadder()) {
-		std::ostringstream threshold;
-		threshold << std::fixed << std::setprecision(2) << rung.rewrite_threshold;
-		state->rows.push_back({Value("rewrite_rung"), Value(rung.name),
-		                       Value(std::to_string(rung.min_delete_count) + " deletes"),
-		                       Value(std::to_string(rung.min_deleted_bytes) + " deleted_bytes"),
-		                       Value(threshold.str()),
-		                       Value("byte_weighted; not equal-width ratio buckets")});
+static void SetPolicyReturnTypes(vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
+	names = {"kind", "name", "status", "details"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+}
+
+static std::string FormatFixed2(double value) {
+	std::ostringstream out;
+	out << std::fixed << std::setprecision(2) << value;
+	return out.str();
+}
+
+static void EmitPolicy(RowState &state, const lakemon::policy::ActivePolicy &policy) {
+	for (const auto &rung : policy.ladder) {
+		const char *source = lakemon::policy::PolicyKeyOverridden(policy, lakemon::policy::kKindRewriteRung, rung.name)
+		                         ? lakemon::policy::kSourceOverride
+		                         : lakemon::policy::kSourceDefault;
+		state.rows.push_back({Value(lakemon::policy::kKindRewriteRung), Value(rung.name),
+		                      Value(std::to_string(rung.min_delete_count) + " deletes"),
+		                      Value(std::to_string(rung.min_deleted_bytes) + " deleted_bytes"),
+		                      Value(FormatFixed2(rung.rewrite_threshold)),
+		                      Value("byte_weighted; min_delete_ratio=" + FormatFixed2(rung.min_delete_ratio)),
+		                      Value(source)});
 	}
-	for (const auto &tier : lakemon::policy::DefaultMergeTiers()) {
-		state->rows.push_back({Value("merge_tier"), Value(tier.name), Value(std::to_string(tier.min_file_size)),
-		                       Value(std::to_string(tier.max_file_size)), Value(tier.target_file_size),
-		                       Value("max_compacted_files=" + std::to_string(tier.max_compacted_files))});
+	for (const auto &tier : policy.tiers) {
+		const char *source = lakemon::policy::PolicyKeyOverridden(policy, lakemon::policy::kKindMergeTier, tier.name)
+		                         ? lakemon::policy::kSourceOverride
+		                         : lakemon::policy::kSourceDefault;
+		state.rows.push_back({Value(lakemon::policy::kKindMergeTier), Value(tier.name),
+		                      Value(std::to_string(tier.min_file_size)), Value(std::to_string(tier.max_file_size)),
+		                      Value(tier.target_file_size),
+		                      Value("max_compacted_files=" + std::to_string(tier.max_compacted_files)), Value(source)});
+	}
+}
+
+static unique_ptr<FunctionData> PolicyBind(ClientContext &, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
+	auto data = make_uniq<PolicyBindData>();
+	if (!input.inputs.empty()) {
+		data->catalog = RequireCatalog(input.inputs[0]);
+	}
+	PolicyReturnTypes(return_types, names);
+	return std::move(data);
+}
+
+static unique_ptr<GlobalTableFunctionState> PolicyInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto &bind = input.bind_data->Cast<PolicyBindData>();
+	auto state = make_uniq<RowState>();
+	if (bind.catalog.empty()) {
+		EmitPolicy(*state, lakemon::policy::DefaultPolicy());
+		return std::move(state);
+	}
+	try {
+		std::string error;
+		const auto policy = lakemon::LoadActivePolicy(context, bind.catalog, &error);
+		EmitPolicy(*state, policy);
+		if (!error.empty()) {
+			state->rows.push_back({Value("error"), Value(""), Value(""), Value(""), Value(""), Value(error),
+			                       Value("error")});
+		}
+	} catch (const InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
+	} catch (const Exception &) {
+		throw;
+	} catch (const std::exception &ex) {
+		throw InvalidInputException("lakemon: %s", lakemon::SafeWhat(ex));
+	}
+	return std::move(state);
+}
+
+static bool AsNonNegative(int64_t value, uint64_t &out, const char *field) {
+	if (value < 0) {
+		throw InvalidInputException("lakemon: %s must be >= 0", field);
+	}
+	out = static_cast<uint64_t>(value);
+	return true;
+}
+
+static void ParseNamedSetPolicy(TableFunctionBindInput &input, SetPolicyBindData &data) {
+	for (auto &entry : input.named_parameters) {
+		if (entry.second.IsNull()) {
+			throw InvalidInputException("lakemon: named parameter cannot be NULL");
+		}
+		if (entry.first == "reset") {
+			data.patch.reset = BooleanValue::Get(entry.second);
+		} else if (entry.first == "reset_all") {
+			data.reset_all = BooleanValue::Get(entry.second);
+		} else if (entry.first == "min_delete_count") {
+			data.patch.set_min_delete_count =
+			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.min_delete_count, "min_delete_count");
+		} else if (entry.first == "min_deleted_bytes") {
+			data.patch.set_min_deleted_bytes =
+			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.min_deleted_bytes, "min_deleted_bytes");
+		} else if (entry.first == "min_delete_ratio") {
+			data.patch.set_min_delete_ratio = true;
+			data.patch.min_delete_ratio = entry.second.GetValue<double>();
+		} else if (entry.first == "rewrite_threshold") {
+			data.patch.set_rewrite_threshold = true;
+			data.patch.rewrite_threshold = entry.second.GetValue<double>();
+		} else if (entry.first == "min_file_size") {
+			data.patch.set_min_file_size =
+			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.min_file_size, "min_file_size");
+		} else if (entry.first == "max_file_size") {
+			data.patch.set_max_file_size =
+			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.max_file_size, "max_file_size");
+		} else if (entry.first == "target_file_size") {
+			data.patch.set_target_file_size = true;
+			data.patch.target_file_size = StringValue::Get(entry.second);
+		} else if (entry.first == "max_compacted_files") {
+			data.patch.set_max_compacted_files =
+			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.max_compacted_files, "max_compacted_files");
+		} else {
+			throw InvalidInputException("lakemon: unknown set_policy parameter '%s'", entry.first);
+		}
+	}
+}
+
+static unique_ptr<FunctionData> SetPolicyBind(ClientContext &, TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
+	auto data = make_uniq<SetPolicyBindData>();
+	data->catalog = RequireCatalog(input.inputs[0]);
+	if (input.inputs.size() >= 3) {
+		if (input.inputs[1].IsNull() || input.inputs[2].IsNull()) {
+			throw InvalidInputException("lakemon: kind and name are required");
+		}
+		data->kind = StringValue::Get(input.inputs[1]);
+		data->name = StringValue::Get(input.inputs[2]);
+	}
+	try {
+		ParseNamedSetPolicy(input, *data);
+	} catch (const InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
+	} catch (const Exception &) {
+		throw;
+	} catch (const std::exception &ex) {
+		throw InvalidInputException("lakemon: %s", lakemon::SafeWhat(ex));
+	}
+	if (input.inputs.size() < 3 && !data->reset_all) {
+		throw InvalidInputException("lakemon: lakemon_set_policy(catalog) requires reset_all => true");
+	}
+	SetPolicyReturnTypes(return_types, names);
+	return std::move(data);
+}
+
+static unique_ptr<GlobalTableFunctionState> SetPolicyInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto &bind = input.bind_data->Cast<SetPolicyBindData>();
+	auto state = make_uniq<RowState>();
+	try {
+		if (bind.reset_all) {
+			lakemon::DeleteStoredPolicyCatalog(context, bind.catalog);
+			state->rows.push_back({Value(""), Value(""), Value("ok"), Value("reset all persisted overrides")});
+			return std::move(state);
+		}
+		std::string error;
+		lakemon::policy::ActivePolicy policy = lakemon::LoadActivePolicy(context, bind.catalog, &error);
+		if (!error.empty()) {
+			throw InvalidInputException("%s", error);
+		}
+		if (!lakemon::policy::ApplyPolicyPatch(policy, bind.kind, bind.name, bind.patch, error)) {
+			throw InvalidInputException("%s", error);
+		}
+		std::string canonical;
+		if (!lakemon::policy::NormalizePolicyKind(bind.kind, canonical, error)) {
+			throw InvalidInputException("%s", error);
+		}
+		if (bind.patch.reset) {
+			std::string stored_name = bind.name;
+			if (canonical == lakemon::policy::kKindRewriteRung) {
+				const auto *rung = lakemon::policy::FindRewriteRung(policy, bind.name);
+				if (rung) {
+					stored_name = rung->name;
+				}
+			} else {
+				const auto *tier = lakemon::policy::FindMergeTier(policy, bind.name);
+				if (tier) {
+					stored_name = tier->name;
+				}
+			}
+			lakemon::DeleteStoredPolicyRow(context, bind.catalog, canonical, stored_name);
+			state->rows.push_back(
+			    {Value(canonical), Value(stored_name), Value("ok"), Value("reset to built-in default")});
+			return std::move(state);
+		}
+		if (canonical == lakemon::policy::kKindRewriteRung) {
+			const auto *rung = lakemon::policy::FindRewriteRung(policy, bind.name);
+			if (!rung) {
+				throw InvalidInputException("lakemon: unknown rewrite rung '%s'", bind.name);
+			}
+			lakemon::UpsertStoredPolicyRow(context, bind.catalog, lakemon::policy::RowFromRung(*rung));
+			state->rows.push_back({Value(canonical), Value(rung->name), Value("ok"),
+			                       Value("rewrite_threshold=" + FormatFixed2(rung->rewrite_threshold))});
+		} else {
+			const auto *tier = lakemon::policy::FindMergeTier(policy, bind.name);
+			if (!tier) {
+				throw InvalidInputException("lakemon: unknown merge tier '%s'", bind.name);
+			}
+			lakemon::UpsertStoredPolicyRow(context, bind.catalog, lakemon::policy::RowFromTier(*tier));
+			state->rows.push_back({Value(canonical), Value(tier->name), Value("ok"),
+			                       Value("target_file_size=" + tier->target_file_size)});
+		}
+	} catch (const InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
+	} catch (const Exception &ex) {
+		state->rows.push_back({Value(bind.kind), Value(bind.name), Value("error"), Value(lakemon::SafeWhat(ex))});
+	} catch (const std::exception &ex) {
+		state->rows.push_back({Value(bind.kind), Value(bind.name), Value("error"), Value(lakemon::SafeWhat(ex))});
 	}
 	return std::move(state);
 }
@@ -250,6 +455,19 @@ static void AddNamedMaintainParams(TableFunction &function) {
 	function.named_parameters["skip_cleanup"] = LogicalType::BOOLEAN;
 	function.named_parameters["expire_older_than"] = LogicalType::VARCHAR;
 	function.named_parameters["delete_older_than"] = LogicalType::VARCHAR;
+	function.named_parameters["max_compacted_files"] = LogicalType::BIGINT;
+}
+
+static void AddNamedSetPolicyParams(TableFunction &function) {
+	function.named_parameters["reset"] = LogicalType::BOOLEAN;
+	function.named_parameters["reset_all"] = LogicalType::BOOLEAN;
+	function.named_parameters["min_delete_count"] = LogicalType::BIGINT;
+	function.named_parameters["min_deleted_bytes"] = LogicalType::BIGINT;
+	function.named_parameters["min_delete_ratio"] = LogicalType::DOUBLE;
+	function.named_parameters["rewrite_threshold"] = LogicalType::DOUBLE;
+	function.named_parameters["min_file_size"] = LogicalType::BIGINT;
+	function.named_parameters["max_file_size"] = LogicalType::BIGINT;
+	function.named_parameters["target_file_size"] = LogicalType::VARCHAR;
 	function.named_parameters["max_compacted_files"] = LogicalType::BIGINT;
 }
 
@@ -273,8 +491,20 @@ void LoadInternal(ExtensionLoader &loader) {
 	stats.AddFunction(TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, EmitRows, StatsBind, StatsInit));
 	loader.RegisterFunction(stats);
 
-	TableFunction policy("lakemon_policy", {}, EmitRows, PolicyBind, PolicyInit);
+	TableFunctionSet policy("lakemon_policy");
+	policy.AddFunction(TableFunction({}, EmitRows, PolicyBind, PolicyInit));
+	policy.AddFunction(TableFunction({LogicalType::VARCHAR}, EmitRows, PolicyBind, PolicyInit));
 	loader.RegisterFunction(policy);
+
+	TableFunctionSet set_policy("lakemon_set_policy");
+	TableFunction set_one({LogicalType::VARCHAR}, EmitRows, SetPolicyBind, SetPolicyInit);
+	AddNamedSetPolicyParams(set_one);
+	set_policy.AddFunction(set_one);
+	TableFunction set_three({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, EmitRows,
+	                        SetPolicyBind, SetPolicyInit);
+	AddNamedSetPolicyParams(set_three);
+	set_policy.AddFunction(set_three);
+	loader.RegisterFunction(set_policy);
 }
 
 void LakemonExtension::Load(ExtensionLoader &loader) {
