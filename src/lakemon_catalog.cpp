@@ -1,4 +1,5 @@
 #include "lakemon_catalog.hpp"
+#include "lakemon_store.hpp"
 
 #include "duckdb/common/exception.hpp"
 
@@ -274,9 +275,12 @@ std::vector<policy::TableHint> InventoryTables(duckdb::ClientContext &context, c
 	}
 	std::string options_error;
 	const std::vector<policy::OptionBinding> options = LoadCatalogOptions(context, catalog, &options_error);
+	std::string policy_error;
+	const policy::ActivePolicy active = LoadActivePolicy(context, catalog, &policy_error);
+	(void)policy_error;
 	std::vector<policy::TableHint> hints;
 	for (auto &entry : grouped) {
-		policy::TableHint hint = policy::SummarizeTable(entry.second);
+		policy::TableHint hint = policy::SummarizeTable(entry.second, active);
 		policy::ApplyNativeOptions(hint, options);
 		hints.push_back(std::move(hint));
 	}

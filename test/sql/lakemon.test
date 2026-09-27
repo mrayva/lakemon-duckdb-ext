@@ -53,3 +53,87 @@ query I
 SELECT threshold_or_target FROM lakemon_policy() WHERE kind = 'merge_tier' AND name = 'micro';
 ----
 5MB
+
+query I
+SELECT source FROM lakemon_policy() WHERE kind = 'rewrite_rung' AND name = 'hot';
+----
+default
+
+# Persist does not require an attached DuckLake catalog.
+query II
+SELECT status, details FROM lakemon_set_policy('lake', 'rewrite_rung', 'hot', rewrite_threshold => 0.20);
+----
+ok	rewrite_threshold=0.20
+
+query II
+SELECT threshold_or_target, source FROM lakemon_policy('lake') WHERE kind = 'rewrite_rung' AND name = 'hot';
+----
+0.20	override
+
+# Zero-arg form stays on built-in defaults.
+query II
+SELECT threshold_or_target, source FROM lakemon_policy() WHERE kind = 'rewrite_rung' AND name = 'hot';
+----
+0.15	default
+
+query I
+SELECT threshold_or_target FROM lakemon_policy('lake') WHERE kind = 'rewrite_rung' AND name = 'warm';
+----
+0.40
+
+query II
+SELECT status, details FROM lakemon_set_policy('lake', 'merge_tier', 'micro', target_file_size => '8MB', max_compacted_files => 128);
+----
+ok	target_file_size=8MB
+
+query II
+SELECT threshold_or_target, source FROM lakemon_policy('lake') WHERE kind = 'merge_tier' AND name = 'micro';
+----
+8MB	override
+
+query I
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_rung', 'hot', reset => true);
+----
+ok
+
+query I
+SELECT source FROM lakemon_policy('lake') WHERE kind = 'rewrite_rung' AND name = 'hot';
+----
+default
+
+query I
+SELECT status FROM lakemon_set_policy('other', 'rewrite_rung', 'cool', min_delete_ratio => 0.60);
+----
+ok
+
+# Catalog keys are independent.
+query I
+SELECT source FROM lakemon_policy('lake') WHERE kind = 'rewrite_rung' AND name = 'cool';
+----
+default
+
+query I
+SELECT status FROM lakemon_set_policy('other', reset_all => true);
+----
+ok
+
+query I
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_rung', 'scorching', rewrite_threshold => 0.10);
+----
+error
+
+query I
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_rung', 'hot', rewrite_threshold => 1.5);
+----
+error
+
+# Session stays usable after set_policy errors.
+query I
+SELECT lakemon_version();
+----
+0.1.0
+
+statement error
+CALL lakemon_set_policy('');
+----
+lakemon:

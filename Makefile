@@ -15,3 +15,6 @@ policy-test:
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -I$(PROJ_DIR)src/include -I$(PROJ_DIR)test/policy \
 		-o $(PROJ_DIR)test/policy/test_options $(PROJ_DIR)test/policy/test_options.cpp
 	$(PROJ_DIR)test/policy/test_options
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -I$(PROJ_DIR)src/include -I$(PROJ_DIR)test/policy \
+		-o $(PROJ_DIR)test/policy/test_overrides $(PROJ_DIR)test/policy/test_overrides.cpp
+	$(PROJ_DIR)test/policy/test_overrides

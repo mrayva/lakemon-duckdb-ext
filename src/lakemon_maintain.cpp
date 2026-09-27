@@ -3,6 +3,7 @@
 #include "lakemon_catalog.hpp"
 #include "lakemon_pipeline.hpp"
 #include "lakemon_policy.hpp"
+#include "lakemon_store.hpp"
 
 #include "duckdb/common/exception.hpp"
 
@@ -93,10 +94,13 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	std::vector<policy::TableHint> hints;
 	std::vector<InventoryDiagnostic> diagnostics;
 	std::string options_error;
+	std::string policy_error;
 	std::vector<policy::OptionBinding> catalog_options;
+	policy::ActivePolicy active = policy::DefaultPolicy();
 	try {
 		hints = InventoryTables(context, options.catalog, options.table, &diagnostics, &files);
 		catalog_options = LoadCatalogOptions(context, options.catalog, &options_error);
+		active = LoadActivePolicy(context, options.catalog, &policy_error);
 	} catch (const duckdb::InterruptException &) {
 		throw;
 	} catch (const std::bad_alloc &) {
@@ -127,6 +131,9 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	                       static_cast<int64_t>(hints.size()), "byte_weighted rewrite ladder + merge size bands"));
 	if (!options_error.empty()) {
 		rows.push_back(MakeRow("catalog_options", "", "", "ducklake_options", "error", 0, 0, options_error));
+	}
+	if (!policy_error.empty()) {
+		rows.push_back(MakeRow("lakemon_policy", "", "", "persisted_overrides", "error", 0, 0, policy_error));
 	}
 
 	const bool catalog_wide = options.table.table.empty();
@@ -196,7 +203,7 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			                       static_cast<int64_t>(hint.file_count), 0, "auto_compact=false"));
 			continue;
 		}
-		for (const auto &tier : policy::DefaultMergeTiers()) {
+		for (const auto &tier : active.tiers) {
 			uint64_t candidates = 0;
 			for (const auto &file : table_files) {
 				if (policy::FileQualifiesForMergeTier(file, tier)) {
