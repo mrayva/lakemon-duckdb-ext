@@ -1,6 +1,7 @@
 #include "lakemon_maintain.hpp"
 
 #include "lakemon_catalog.hpp"
+#include "lakemon_compat.hpp"
 #include "lakemon_pipeline.hpp"
 #include "lakemon_policy.hpp"
 #include "lakemon_store.hpp"

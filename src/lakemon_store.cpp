@@ -1,5 +1,6 @@
 #include "lakemon_store.hpp"
 
+#include "lakemon_compat.hpp"
 #include "lakemon_sql.hpp"
 
 #include "duckdb/common/exception.hpp"
