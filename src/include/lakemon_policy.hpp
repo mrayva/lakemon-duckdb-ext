@@ -14,10 +14,10 @@ namespace policy {
 
 constexpr uint64_t kMiB = 1024ULL * 1024ULL;
 
-inline const char *kKindRewriteRung = "rewrite_rung";
-inline const char *kKindMergeTier = "merge_tier";
-inline const char *kSourceDefault = "default";
-inline const char *kSourceOverride = "override";
+static constexpr const char *kKindRewriteRung = "rewrite_rung";
+static constexpr const char *kKindMergeTier = "merge_tier";
+static constexpr const char *kSourceDefault = "default";
+static constexpr const char *kSourceOverride = "override";
 
 struct FileStat {
 	std::string schema_name;
