@@ -1,3 +1,4 @@
+#include "expect.hpp"
 #include "lakemon_options.hpp"
 #include "lakemon_policy.hpp"
 
@@ -6,15 +7,6 @@
 #include <vector>
 
 using namespace lakemon::policy;
-
-static int failures = 0;
-
-static void Expect(bool cond, const std::string &msg) {
-	if (!cond) {
-		std::cerr << "FAIL: " << msg << std::endl;
-		failures++;
-	}
-}
 
 static std::vector<OptionBinding> SampleOptions() {
 	std::vector<OptionBinding> rows;
@@ -145,8 +137,8 @@ int main() {
 	TestIntervalsAndOverride();
 	TestAutoCompact();
 	TestTargetAndHintOverlay();
-	if (failures) {
-		std::cerr << failures << " failure(s)" << std::endl;
+	if (TestFailures()) {
+		std::cerr << TestFailures() << " failure(s)" << std::endl;
 		return 1;
 	}
 	std::cout << "option tests ok" << std::endl;

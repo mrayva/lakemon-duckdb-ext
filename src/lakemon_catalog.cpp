@@ -1,9 +1,11 @@
 #include "lakemon_catalog.hpp"
+#include "lakemon_store.hpp"
 
 #include "duckdb/common/exception.hpp"
 
 #include <exception>
 #include <map>
+#include <new>
 #include <sstream>
 
 namespace lakemon {
@@ -21,8 +23,22 @@ static bool MatchesFilter(const policy::FileStat &file, const TableRef &filter) 
 	return filter.schema.empty() || file.schema_name == filter.schema;
 }
 
+static void AppendDiagnostic(std::vector<InventoryDiagnostic> *diagnostics, const std::string &schema,
+                             const std::string &table, const std::string &source, const std::string &message) {
+	if (!diagnostics) {
+		return;
+	}
+	InventoryDiagnostic row;
+	row.schema_name = schema;
+	row.table_name = table;
+	row.source = source;
+	row.message = message.empty() ? "lakemon: unread DuckLake metadata" : message;
+	diagnostics->push_back(std::move(row));
+}
+
 static std::vector<policy::FileStat> InventoryFromMetadata(duckdb::ClientContext &context, const std::string &catalog,
-                                                           const TableRef &filter) {
+                                                           const TableRef &filter,
+                                                           std::vector<InventoryDiagnostic> *diagnostics) {
 	const std::string meta = QuoteIdent(MetadataCatalog(catalog));
 	std::ostringstream sql;
 	sql << "SELECT s.schema_name, t.table_name, d.data_file_id, d.file_size_bytes, d.record_count, "
@@ -50,13 +66,17 @@ static std::vector<policy::FileStat> InventoryFromMetadata(duckdb::ClientContext
 	}
 	const auto n = result->RowCount();
 	for (duckdb::idx_t i = 0; i < n; i++) {
+		std::string schema_name;
+		std::string table_name;
 		try {
-			policy::FileStat file;
-			file.schema_name = CellString(*result, 0, i);
-			file.table_name = CellString(*result, 1, i);
-			if (file.table_name.empty()) {
+			schema_name = CellString(*result, 0, i);
+			table_name = CellString(*result, 1, i);
+			if (table_name.empty()) {
 				continue;
 			}
+			policy::FileStat file;
+			file.schema_name = schema_name;
+			file.table_name = table_name;
 			file.data_file_id = static_cast<uint64_t>(CellInt64(*result, 2, i));
 			file.file_size_bytes = static_cast<uint64_t>(CellInt64(*result, 3, i));
 			file.record_count = static_cast<uint64_t>(CellInt64(*result, 4, i));
@@ -67,9 +87,13 @@ static std::vector<policy::FileStat> InventoryFromMetadata(duckdb::ClientContext
 			}
 		} catch (const duckdb::InterruptException &) {
 			throw;
-		} catch (const duckdb::Exception &) {
+		} catch (const std::bad_alloc &) {
+			throw;
+		} catch (const duckdb::Exception &ex) {
+			AppendDiagnostic(diagnostics, schema_name, table_name, "metadata", SafeWhat(ex));
 			continue;
-		} catch (const std::exception &) {
+		} catch (const std::exception &ex) {
+			AppendDiagnostic(diagnostics, schema_name, table_name, "metadata", SafeWhat(ex));
 			continue;
 		}
 	}
@@ -77,7 +101,8 @@ static std::vector<policy::FileStat> InventoryFromMetadata(duckdb::ClientContext
 }
 
 static std::vector<policy::FileStat> InventoryFromListFiles(duckdb::ClientContext &context, const std::string &catalog,
-                                                            const TableRef &filter) {
+                                                            const TableRef &filter,
+                                                            std::vector<InventoryDiagnostic> *diagnostics) {
 	auto tables = RunSQL(context, "SELECT table_name, schema_id, table_id FROM ducklake_table_info(" +
 	                                  QuoteString(catalog) + ")");
 	std::vector<policy::FileStat> files;
@@ -101,6 +126,8 @@ static std::vector<policy::FileStat> InventoryFromListFiles(duckdb::ClientContex
 		try {
 			auto listed = RunSQL(context, list_sql.str());
 			if (!listed) {
+				AppendDiagnostic(diagnostics, filter.schema, table_name, "list_files",
+				                 "lakemon: list_files returned no result");
 				continue;
 			}
 			const auto file_n = listed->RowCount();
@@ -117,9 +144,13 @@ static std::vector<policy::FileStat> InventoryFromListFiles(duckdb::ClientContex
 			}
 		} catch (const duckdb::InterruptException &) {
 			throw;
-		} catch (const duckdb::Exception &) {
+		} catch (const std::bad_alloc &) {
+			throw;
+		} catch (const duckdb::Exception &ex) {
+			AppendDiagnostic(diagnostics, filter.schema, table_name, "list_files", SafeWhat(ex));
 			continue;
-		} catch (const std::exception &) {
+		} catch (const std::exception &ex) {
+			AppendDiagnostic(diagnostics, filter.schema, table_name, "list_files", SafeWhat(ex));
 			continue;
 		}
 	}
@@ -127,18 +158,22 @@ static std::vector<policy::FileStat> InventoryFromListFiles(duckdb::ClientContex
 }
 
 std::vector<policy::FileStat> InventoryFiles(duckdb::ClientContext &context, const std::string &catalog,
-                                             const TableRef &filter) {
+                                             const TableRef &filter, std::vector<InventoryDiagnostic> *diagnostics) {
 	if (catalog.empty()) {
 		throw InvalidInputException("lakemon: catalog name is required");
 	}
 	try {
-		return InventoryFromMetadata(context, catalog, filter);
+		return InventoryFromMetadata(context, catalog, filter, diagnostics);
 	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const duckdb::Exception &) {
 		try {
-			return InventoryFromListFiles(context, catalog, filter);
+			return InventoryFromListFiles(context, catalog, filter, diagnostics);
 		} catch (const duckdb::InterruptException &) {
+			throw;
+		} catch (const std::bad_alloc &) {
 			throw;
 		} catch (const duckdb::Exception &second) {
 			throw InvalidInputException(
@@ -186,6 +221,8 @@ static bool TryLoadOptionsQuery(duckdb::ClientContext &context, const std::strin
 		return true;
 	} catch (const duckdb::InterruptException &) {
 		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
 	} catch (const duckdb::Exception &ex) {
 		error = SafeWhat(ex);
 		return false;
@@ -224,21 +261,34 @@ std::vector<policy::OptionBinding> LoadCatalogOptions(duckdb::ClientContext &con
 }
 
 std::vector<policy::TableHint> InventoryTables(duckdb::ClientContext &context, const std::string &catalog,
-                                               const TableRef &filter) {
-	auto files = InventoryFiles(context, catalog, filter);
+                                               const TableRef &filter, std::vector<InventoryDiagnostic> *diagnostics,
+                                               std::vector<policy::FileStat> *files_out) {
+	std::vector<InventoryDiagnostic> local_diagnostics;
+	std::vector<InventoryDiagnostic> *sink = diagnostics ? diagnostics : &local_diagnostics;
+	auto files = InventoryFiles(context, catalog, filter, sink);
+	if (files_out) {
+		*files_out = files;
+	}
 	std::map<std::pair<std::string, std::string>, std::vector<policy::FileStat>> grouped;
 	for (auto &file : files) {
 		grouped[{file.schema_name, file.table_name}].push_back(std::move(file));
 	}
-	std::string options_error;
+	[[maybe_unused]] std::string options_error;
 	const std::vector<policy::OptionBinding> options = LoadCatalogOptions(context, catalog, &options_error);
+	[[maybe_unused]] std::string policy_error;
+	const policy::ActivePolicy active = LoadActivePolicy(context, catalog, &policy_error);
 	std::vector<policy::TableHint> hints;
 	for (auto &entry : grouped) {
-		policy::TableHint hint = policy::SummarizeTable(entry.second);
+		policy::TableHint hint = policy::SummarizeTable(entry.second, active);
 		policy::ApplyNativeOptions(hint, options);
 		hints.push_back(std::move(hint));
 	}
-	(void)options_error;
+	// table_stats has no status column: total unread metadata must not look empty.
+	// Join every diagnostic (maintain already surfaces each one as a row).
+	if (!diagnostics && hints.empty() && !local_diagnostics.empty()) {
+		const std::string summary = FormatInventoryDiagnostics(local_diagnostics);
+		throw InvalidInputException("lakemon: unread DuckLake metadata: %s", summary.c_str());
+	}
 	return hints;
 }
 

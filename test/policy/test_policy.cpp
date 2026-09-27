@@ -1,3 +1,6 @@
+#include "expect.hpp"
+#include "lakemon_diagnostics.hpp"
+#include "lakemon_pipeline.hpp"
 #include "lakemon_policy.hpp"
 
 #include <cmath>
@@ -6,15 +9,6 @@
 #include <string>
 
 using namespace lakemon::policy;
-
-static int failures = 0;
-
-static void Expect(bool cond, const std::string &msg) {
-	if (!cond) {
-		std::cerr << "FAIL: " << msg << std::endl;
-		failures++;
-	}
-}
 
 static void TestDeletedBytesUsesCountNotEqualBuckets() {
 	FileStat heavy;
@@ -109,6 +103,45 @@ static void TestTableHintMerge() {
 	Expect(hint.file_count == 5, "file_count");
 }
 
+static void TestOneFileDoesNotHintMerge() {
+	FileStat f;
+	f.schema_name = "s";
+	f.table_name = "t";
+	f.file_size_bytes = 100 * 1024;
+	const auto hint = SummarizeTable(std::vector<FileStat>(1, f));
+	Expect(hint.merge_tier_hint == "none", "one file stays below the 2ULL merge hint");
+}
+
+static void TestPipelineDependsOnFlush() {
+	Expect(lakemon::StepDependsOnFlush("rewrite"), "rewrite depends on flush_inlined");
+	Expect(lakemon::StepDependsOnFlush("merge"), "merge depends on flush_inlined");
+	Expect(!lakemon::StepDependsOnFlush("expire_snapshots"), "expire is independent of flush");
+	Expect(!lakemon::StepDependsOnFlush("cleanup_old_files"), "cleanup is independent of flush");
+	Expect(!lakemon::StepDependsOnFlush("delete_orphaned_files"), "orphan cleanup is independent of flush");
+	Expect(!lakemon::StepDependsOnFlush("inventory"), "inventory is not a flush dependent");
+	Expect(std::string(lakemon::SkipReasonFlushFailed()) == "skipped: flush_inlined failed",
+	       "skip reason is explicit");
+}
+
+static void TestFormatInventoryDiagnosticsJoinsAll() {
+	lakemon::InventoryDiagnostic first;
+	first.schema_name = "main";
+	first.table_name = "events";
+	first.source = "metadata";
+	first.message = "missing delete_count";
+	lakemon::InventoryDiagnostic second;
+	second.schema_name = "sales";
+	second.table_name = "orders";
+	second.source = "list_files";
+	second.message = "lakemon: list_files returned no result";
+	const std::string joined = lakemon::FormatInventoryDiagnostics({first, second});
+	Expect(joined.find("main.events (metadata): missing delete_count") != std::string::npos,
+	       "first diagnostic is kept");
+	Expect(joined.find("sales.orders (list_files): lakemon: list_files returned no result") != std::string::npos,
+	       "second diagnostic is not truncated");
+	Expect(joined.find("; ") != std::string::npos, "multiple diagnostics are joined");
+}
+
 int main() {
 	TestDeletedBytesUsesCountNotEqualBuckets();
 	TestHotRungByDeleteCount();
@@ -117,8 +150,11 @@ int main() {
 	TestByteWeightedThresholdPicksHot();
 	TestMergeTiers();
 	TestTableHintMerge();
-	if (failures) {
-		std::cerr << failures << " failure(s)" << std::endl;
+	TestOneFileDoesNotHintMerge();
+	TestPipelineDependsOnFlush();
+	TestFormatInventoryDiagnosticsJoinsAll();
+	if (TestFailures()) {
+		std::cerr << TestFailures() << " failure(s)" << std::endl;
 		return 1;
 	}
 	std::cout << "policy tests ok" << std::endl;

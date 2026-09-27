@@ -1,11 +1,14 @@
 #include "lakemon_maintain.hpp"
 
 #include "lakemon_catalog.hpp"
+#include "lakemon_pipeline.hpp"
 #include "lakemon_policy.hpp"
+#include "lakemon_store.hpp"
 
 #include "duckdb/common/exception.hpp"
 
 #include <exception>
+#include <new>
 #include <sstream>
 
 namespace lakemon {
@@ -61,6 +64,8 @@ static void AppendCall(std::vector<MaintainRow> &rows, duckdb::ClientContext &co
 		rows.push_back(MakeRow(step, schema, table, action, "ok", 0, created, details));
 	} catch (const duckdb::InterruptException &) {
 		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
 	} catch (const Exception &ex) {
 		rows.push_back(MakeRow(step, schema, table, action, "error", 0, 0, SafeWhat(ex)));
 	} catch (const std::exception &ex) {
@@ -68,21 +73,37 @@ static void AppendCall(std::vector<MaintainRow> &rows, duckdb::ClientContext &co
 	}
 }
 
-// Inventory failure: one status=error row, then stop (do not CALL rewrite/merge
-// against an unread catalog). Nested DuckLake CALL failures: status=error for
-// that step, then continue later independent steps (rewrite / merge / expire /
-// cleanup). InterruptException is rethrown. The session stays usable.
+static bool HasStepStatus(const std::vector<MaintainRow> &rows, const std::string &step, const std::string &status) {
+	for (const auto &row : rows) {
+		if (row.step == step && row.status == status) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Inventory failure: status=error row(s), then stop (do not CALL rewrite/merge
+// against an unread catalog). Unread per-table metadata: status=error diagnostic
+// rows; continue with tables that were read. flush_inlined failure: rewrite and
+// merge are skipped (status=skip). expire/cleanup are independent and still run
+// after a flush/rewrite/merge error. InterruptException and bad_alloc rethrow.
+// The session stays usable.
 std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const MaintainOptions &options) {
 	std::vector<MaintainRow> rows;
 	std::vector<policy::FileStat> files;
 	std::vector<policy::TableHint> hints;
+	std::vector<InventoryDiagnostic> diagnostics;
 	std::string options_error;
+	std::string policy_error;
 	std::vector<policy::OptionBinding> catalog_options;
+	policy::ActivePolicy active = policy::DefaultPolicy();
 	try {
-		files = InventoryFiles(context, options.catalog, options.table);
-		hints = InventoryTables(context, options.catalog, options.table);
+		hints = InventoryTables(context, options.catalog, options.table, &diagnostics, &files);
 		catalog_options = LoadCatalogOptions(context, options.catalog, &options_error);
+		active = LoadActivePolicy(context, options.catalog, &policy_error);
 	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const Exception &ex) {
 		rows.push_back(MakeRow("inventory", options.table.schema, options.table.table, "catalog_select", "error", 0, 0,
@@ -95,9 +116,14 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	}
 
 	try {
+	for (const auto &diag : diagnostics) {
+		rows.push_back(MakeRow("inventory", diag.schema_name, diag.table_name, diag.source, "error", 0, 0, diag.message));
+	}
 	if (hints.empty()) {
-		rows.push_back(MakeRow("inventory", options.table.schema, options.table.table, "catalog_select", "skip", 0, 0,
-		                       "no DuckLake tables matched"));
+		if (diagnostics.empty()) {
+			rows.push_back(MakeRow("inventory", options.table.schema, options.table.table, "catalog_select", "skip", 0,
+			                       0, "no DuckLake tables matched"));
+		}
 		return rows;
 	}
 
@@ -105,6 +131,9 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	                       static_cast<int64_t>(hints.size()), "byte_weighted rewrite ladder + merge size bands"));
 	if (!options_error.empty()) {
 		rows.push_back(MakeRow("catalog_options", "", "", "ducklake_options", "error", 0, 0, options_error));
+	}
+	if (!policy_error.empty()) {
+		rows.push_back(MakeRow("lakemon_policy", "", "", "persisted_overrides", "error", 0, 0, policy_error));
 	}
 
 	const bool catalog_wide = options.table.table.empty();
@@ -122,6 +151,7 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 		AppendCall(rows, context, options, "flush_inlined", "ducklake_flush_inlined_data", sql.str(),
 		           options.table.schema, options.table.table, "flush inlined rows before rewrite/merge");
 	}
+	const bool flush_failed = HasStepStatus(rows, "flush_inlined", "error");
 
 	for (const auto &hint : hints) {
 		TableRef ref;
@@ -130,6 +160,11 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 		std::ostringstream details;
 		details << "rung=" << hint.rewrite_rung << " threshold=" << hint.rewrite_threshold
 		        << " deleted_bytes=" << hint.deleted_bytes_weighted;
+		if (flush_failed && StepDependsOnFlush("rewrite")) {
+			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
+			                       static_cast<int64_t>(hint.file_count), 0, SkipReasonFlushFailed()));
+			continue;
+		}
 		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
 			details << " auto_compact=false";
 			rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, "byte_weighted_ladder", "skip",
@@ -158,12 +193,17 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 				table_files.push_back(file);
 			}
 		}
+		if (flush_failed && StepDependsOnFlush("merge")) {
+			rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name, "adjacent_files", "skip",
+			                       static_cast<int64_t>(hint.file_count), 0, SkipReasonFlushFailed()));
+			continue;
+		}
 		if (policy::SkipForAutoCompact(catalog_wide, hint.auto_compact)) {
 			rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name, "auto_compact", "skip",
 			                       static_cast<int64_t>(hint.file_count), 0, "auto_compact=false"));
 			continue;
 		}
-		for (const auto &tier : policy::DefaultMergeTiers()) {
+		for (const auto &tier : active.tiers) {
 			uint64_t candidates = 0;
 			for (const auto &file : table_files) {
 				if (policy::FileQualifiesForMergeTier(file, tier)) {
@@ -192,6 +232,8 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 					try {
 						RunSQL(context, sql.str());
 					} catch (const duckdb::InterruptException &) {
+						throw;
+					} catch (const std::bad_alloc &) {
 						throw;
 					} catch (const Exception &ex) {
 						rows.push_back(MakeRow("merge", hint.schema_name, hint.table_name,
@@ -248,6 +290,8 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 
 	return rows;
 	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const Exception &ex) {
 		rows.push_back(MakeRow("maintain", options.table.schema, options.table.table, "orchestrate", "error", 0, 0,

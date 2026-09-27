@@ -8,6 +8,8 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 
+#include <new>
+
 // DuckDB's extension CMake defines DUCKDB_MAJOR_VERSION. Fall back to the
 // identifier header that exists only on 2.x if the macro is missing.
 #ifndef DUCKDB_MAJOR_VERSION
@@ -47,7 +49,7 @@ inline const char *SafeWhat(const std::exception &ex) {
 }
 
 // Nested SQL on a fresh Connection so a failed DuckLake CALL does not poison
-// the ClientContext that is executing lakemon_*. Interrupt is rethrown.
+// the ClientContext that is executing lakemon_*. Interrupt and bad_alloc are rethrown.
 inline duckdb::unique_ptr<QueryHandle> RunSQL(duckdb::ClientContext &context, const std::string &sql) {
 	if (!context.db) {
 		throw duckdb::InvalidInputException("lakemon: database handle is not available");
@@ -64,6 +66,8 @@ inline duckdb::unique_ptr<QueryHandle> RunSQL(duckdb::ClientContext &context, co
 		return result;
 	} catch (const duckdb::InterruptException &) {
 		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
 	} catch (const duckdb::Exception &) {
 		throw;
 	} catch (const std::exception &ex) {
@@ -71,6 +75,9 @@ inline duckdb::unique_ptr<QueryHandle> RunSQL(duckdb::ClientContext &context, co
 	}
 }
 
+// One cell from a materialized query. Out-of-range or expected DuckDB / benign
+// read errors become a NULL Value. InterruptException and std::bad_alloc are
+// rethrown so fatals are not turned into empty cells.
 inline duckdb::Value CellAt(QueryHandle &result, duckdb::idx_t col, duckdb::idx_t row) {
 	if (col >= result.ColumnCount()) {
 		return duckdb::Value();
@@ -78,6 +85,8 @@ inline duckdb::Value CellAt(QueryHandle &result, duckdb::idx_t col, duckdb::idx_
 	try {
 		return result.GetValue(col, row);
 	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const duckdb::Exception &) {
 		return duckdb::Value();
@@ -102,6 +111,8 @@ inline int64_t CellInt64(QueryHandle &result, duckdb::idx_t col, duckdb::idx_t r
 	try {
 		return value.GetValue<int64_t>();
 	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const duckdb::Exception &) {
 		return fallback;
