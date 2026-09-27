@@ -195,7 +195,7 @@ The in-tree shell already loads `lakemon`.
 
 ## Tests
 
-- `make policy-test` — rewrite-ladder / merge-tier math, DuckLake option precedence, and persisted policy overlays (no DuckDB, seconds)
+- `make policy-test` — rewrite-ladder / merge-tier math, DuckLake option precedence, persisted policy overlays, and generated DuckLake CALL SQL (no DuckDB, seconds)
 - `make test` — SQL smoke: `lakemon_version`, `lakemon_policy` / `lakemon_set_policy`, bind errors / maintain error rows when no catalog is attached
 - CI: `make policy-test` on every push/PR. Full DuckDB **1.5.5** and **2.x** (`v2.0-cyanoptera`) distribution builds run on `main`, `v*` tags, or **Actions → Main Extension Distribution Pipeline → Run workflow** (use that before a community listing submit).
 
