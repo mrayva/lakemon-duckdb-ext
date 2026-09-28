@@ -60,11 +60,28 @@ static void TestRewriteMergeKeepPositionalTableAndSchema() {
 	       "rewrite CALL keeps positional table plus data-driven threshold");
 }
 
+static void TestGlobalRetentionCallsAreCatalogOnly() {
+	Expect(lakemon::ExpireSnapshotsCall("lake", "7 days") ==
+	           "CALL ducklake_expire_snapshots('lake', older_than => now() - INTERVAL '7 days')",
+	       "expire snapshots is catalog-global");
+	Expect(lakemon::CleanupOldFilesCall("lake", "3 days") ==
+	           "CALL ducklake_cleanup_old_files('lake', older_than => now() - INTERVAL '3 days')",
+	       "cleanup uses older_than when set");
+	Expect(lakemon::CleanupOldFilesCall("lake", "") == "CALL ducklake_cleanup_old_files('lake', cleanup_all => true)",
+	       "cleanup_all when delete interval unset");
+	Expect(lakemon::DeleteOrphanedFilesCall("lake") == "CALL ducklake_delete_orphaned_files('lake')",
+	       "orphan delete is catalog-global");
+	Expect(!Contains(lakemon::ExpireSnapshotsCall("lake", "7 days"), "table"), "expire has no table argument");
+	Expect(!Contains(lakemon::FlushInlinedDataCall("lake", lakemon::ParseTableRef("s.t")), "expire"),
+	       "table flush CALL does not expire snapshots");
+}
+
 int main() {
 	TestFlushSchemaQualifiedUsesNamedArgs();
 	TestFlushCatalogOnlyOmitsTable();
 	TestFlushMainAndEmptySchemaOmitSchemaName();
 	TestRewriteMergeKeepPositionalTableAndSchema();
+	TestGlobalRetentionCallsAreCatalogOnly();
 	if (TestFailures()) {
 		std::cerr << TestFailures() << " failure(s)" << std::endl;
 		return 1;

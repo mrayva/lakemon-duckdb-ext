@@ -366,9 +366,23 @@ static void TestPipelineStepsAreIndependent() {
 	Expect(lakemon::InventoryFailureStopsPipeline(), "hard inventory failure stops rewrite/merge");
 	Expect(!lakemon::FlushErrorSkipsStep("rewrite"), "flush error does not skip rewrite");
 	Expect(!lakemon::FlushErrorSkipsStep("merge"), "flush error does not skip merge");
+	Expect(!lakemon::TableMaintainIncludesRetention(),
+	       "lakemon_maintain must not expire snapshots or clean old/orphan files");
+	Expect(!lakemon::GlobalMaintainIncludesTableWork(),
+	       "lakemon_maintain_global must not flush, rewrite, or merge");
 	Expect(!lakemon::FlushErrorSkipsStep("expire_snapshots"), "flush error does not skip expire");
 	Expect(!lakemon::FlushErrorSkipsStep("cleanup_old_files"), "flush error does not skip cleanup");
 	Expect(!lakemon::FlushErrorSkipsStep("delete_orphaned_files"), "flush error does not skip orphan cleanup");
+}
+
+static void TestGlobalExpireCleanupSkipSemantics() {
+	Expect(std::string(lakemon::ExpireSkipReason(true, false)) == "skip_expire", "skip_expire wins");
+	Expect(std::string(lakemon::ExpireSkipReason(true, true)) == "skip_expire", "skip_expire wins even if unset");
+	Expect(std::string(lakemon::ExpireSkipReason(false, true)) == "expire_older_than not set",
+	       "unset interval skips expire");
+	Expect(lakemon::ExpireSkipReason(false, false) == nullptr, "set interval runs expire");
+	Expect(!lakemon::ShouldRunCleanup(true), "skip_cleanup skips old-file and orphan cleanup");
+	Expect(lakemon::ShouldRunCleanup(false), "cleanup runs unless skipped");
 }
 
 static void TestFormatInventoryDiagnosticsJoinsAll() {
@@ -411,6 +425,7 @@ int main() {
 	TestTableHintMerge();
 	TestOneFileDoesNotHintMerge();
 	TestPipelineStepsAreIndependent();
+	TestGlobalExpireCleanupSkipSemantics();
 	TestFormatInventoryDiagnosticsJoinsAll();
 	if (TestFailures()) {
 		std::cerr << TestFailures() << " failure(s)" << std::endl;

@@ -7,7 +7,7 @@
 
 extension:
   name: lakemon
-  description: Smart DuckLake maintenance with an adaptive delete-count rewrite ladder and merge size bands
+  description: Smart DuckLake table maintain (adaptive rewrite + merge) and catalog-global expire/cleanup
   version: 0.1.0
   language: C++
   build: cmake
@@ -33,6 +33,7 @@ docs:
 
     CALL lakemon_table_stats('lake');
     CALL lakemon_maintain('lake');
+    CALL lakemon_maintain_global('lake');
     CALL lakemon_maintain('lake', dry_run => true);
     CALL lakemon_policy();
 
@@ -42,6 +43,7 @@ docs:
     * Catalog SELECT inventory of data files and delete files
     * Adaptive delete-count rewrite ladder (High / Medium / Low; one ducklake_rewrite_data_files CALL per band)
     * Merge size bands (micro / small / medium) with per-tier target_file_size
+    * Table maintain (lakemon_maintain) vs catalog-global expire/cleanup (lakemon_maintain_global)
     * Execute-by-default; pass dry_run => true to plan only
     * One result row per step (ok / skip / error / planned)
 
