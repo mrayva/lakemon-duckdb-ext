@@ -28,6 +28,10 @@ struct MaintainBindData : public TableFunctionData {
 	lakemon::MaintainOptions options;
 };
 
+struct GlobalMaintainBindData : public TableFunctionData {
+	lakemon::GlobalMaintainOptions options;
+};
+
 struct StatsBindData : public TableFunctionData {
 	string catalog;
 	lakemon::TableRef table;
@@ -92,6 +96,19 @@ static void ParseNamedMaintain(TableFunctionBindInput &input, lakemon::MaintainO
 		}
 		if (entry.first == "dry_run") {
 			options.dry_run = BooleanValue::Get(entry.second);
+		} else if (entry.first == "max_compacted_files") {
+			options.max_compacted_files = entry.second.GetValue<int64_t>();
+		}
+	}
+}
+
+static void ParseNamedGlobalMaintain(TableFunctionBindInput &input, lakemon::GlobalMaintainOptions &options) {
+	for (auto &entry : input.named_parameters) {
+		if (entry.second.IsNull()) {
+			throw InvalidInputException("lakemon: named parameter cannot be NULL");
+		}
+		if (entry.first == "dry_run") {
+			options.dry_run = BooleanValue::Get(entry.second);
 		} else if (entry.first == "skip_expire") {
 			options.skip_expire = BooleanValue::Get(entry.second);
 		} else if (entry.first == "skip_cleanup") {
@@ -102,10 +119,31 @@ static void ParseNamedMaintain(TableFunctionBindInput &input, lakemon::MaintainO
 		} else if (entry.first == "delete_older_than") {
 			options.delete_older_than = StringValue::Get(entry.second);
 			options.delete_older_than_set = true;
-		} else if (entry.first == "max_compacted_files") {
-			options.max_compacted_files = entry.second.GetValue<int64_t>();
 		}
 	}
+}
+
+static void MaintainReturnTypes(vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
+	names = {"step", "schema_name", "table_name", "action", "status", "files_processed", "files_created", "details"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::VARCHAR, LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::VARCHAR};
+}
+
+static void FillMaintainRows(RowState &state, const std::vector<lakemon::MaintainRow> &rows) {
+	for (auto &row : rows) {
+		state.rows.push_back({Value(row.step), Value(row.schema_name), Value(row.table_name), Value(row.action),
+		                       Value(row.status), Value::BIGINT(row.files_processed), Value::BIGINT(row.files_created),
+		                       Value(row.details)});
+	}
+}
+
+static lakemon::MaintainRow OrchestrateErrorRow(const char *step, const char *details) {
+	lakemon::MaintainRow row;
+	row.step = step;
+	row.action = "orchestrate";
+	row.status = "error";
+	row.details = details;
+	return row;
 }
 
 static unique_ptr<FunctionData> MaintainBind(ClientContext &, TableFunctionBindInput &input,
@@ -127,9 +165,7 @@ static unique_ptr<FunctionData> MaintainBind(ClientContext &, TableFunctionBindI
 		throw InvalidInputException("lakemon: %s", lakemon::SafeWhat(ex));
 	}
 
-	names = {"step", "schema_name", "table_name", "action", "status", "files_processed", "files_created", "details"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::VARCHAR, LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::VARCHAR};
+	MaintainReturnTypes(return_types, names);
 	return std::move(data);
 }
 
@@ -144,25 +180,50 @@ static unique_ptr<GlobalTableFunctionState> MaintainInit(ClientContext &context,
 	} catch (const std::bad_alloc &) {
 		throw;
 	} catch (const Exception &ex) {
-		lakemon::MaintainRow row;
-		row.step = "maintain";
-		row.action = "orchestrate";
-		row.status = "error";
-		row.details = lakemon::SafeWhat(ex);
-		rows.push_back(row);
+		rows.push_back(OrchestrateErrorRow("maintain", lakemon::SafeWhat(ex)));
 	} catch (const std::exception &ex) {
-		lakemon::MaintainRow row;
-		row.step = "maintain";
-		row.action = "orchestrate";
-		row.status = "error";
-		row.details = lakemon::SafeWhat(ex);
-		rows.push_back(row);
+		rows.push_back(OrchestrateErrorRow("maintain", lakemon::SafeWhat(ex)));
 	}
-	for (auto &row : rows) {
-		state->rows.push_back({Value(row.step), Value(row.schema_name), Value(row.table_name), Value(row.action),
-		                       Value(row.status), Value::BIGINT(row.files_processed), Value::BIGINT(row.files_created),
-		                       Value(row.details)});
+	FillMaintainRows(*state, rows);
+	return std::move(state);
+}
+
+static unique_ptr<FunctionData> GlobalMaintainBind(ClientContext &, TableFunctionBindInput &input,
+                                                   vector<LogicalType> &return_types, lakemon::ColumnNameList &names) {
+	auto data = make_uniq<GlobalMaintainBindData>();
+	data->options.catalog = RequireCatalog(input.inputs[0]);
+	try {
+		ParseNamedGlobalMaintain(input, data->options);
+	} catch (const InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
+	} catch (const Exception &) {
+		throw;
+	} catch (const std::exception &ex) {
+		throw InvalidInputException("lakemon: %s", lakemon::SafeWhat(ex));
 	}
+
+	MaintainReturnTypes(return_types, names);
+	return std::move(data);
+}
+
+static unique_ptr<GlobalTableFunctionState> GlobalMaintainInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto &bind = input.bind_data->Cast<GlobalMaintainBindData>();
+	auto state = make_uniq<RowState>();
+	std::vector<lakemon::MaintainRow> rows;
+	try {
+		rows = lakemon::RunGlobalMaintain(context, bind.options);
+	} catch (const InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
+	} catch (const Exception &ex) {
+		rows.push_back(OrchestrateErrorRow("maintain_global", lakemon::SafeWhat(ex)));
+	} catch (const std::exception &ex) {
+		rows.push_back(OrchestrateErrorRow("maintain_global", lakemon::SafeWhat(ex)));
+	}
+	FillMaintainRows(*state, rows);
 	return std::move(state);
 }
 
@@ -435,11 +496,15 @@ static void VersionFun(DataChunk &, ExpressionState &, Vector &result) {
 
 static void AddNamedMaintainParams(TableFunction &function) {
 	function.named_parameters["dry_run"] = LogicalType::BOOLEAN;
+	function.named_parameters["max_compacted_files"] = LogicalType::BIGINT;
+}
+
+static void AddNamedGlobalMaintainParams(TableFunction &function) {
+	function.named_parameters["dry_run"] = LogicalType::BOOLEAN;
 	function.named_parameters["skip_expire"] = LogicalType::BOOLEAN;
 	function.named_parameters["skip_cleanup"] = LogicalType::BOOLEAN;
 	function.named_parameters["expire_older_than"] = LogicalType::VARCHAR;
 	function.named_parameters["delete_older_than"] = LogicalType::VARCHAR;
-	function.named_parameters["max_compacted_files"] = LogicalType::BIGINT;
 }
 
 static void AddNamedSetPolicyParams(TableFunction &function) {
@@ -470,6 +535,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	AddNamedMaintainParams(maintain_two);
 	maintain.AddFunction(maintain_two);
 	loader.RegisterFunction(maintain);
+
+	TableFunctionSet maintain_global("lakemon_maintain_global");
+	TableFunction maintain_global_one({LogicalType::VARCHAR}, EmitRows, GlobalMaintainBind, GlobalMaintainInit);
+	AddNamedGlobalMaintainParams(maintain_global_one);
+	maintain_global.AddFunction(maintain_global_one);
+	loader.RegisterFunction(maintain_global);
 
 	TableFunctionSet stats("lakemon_table_stats");
 	stats.AddFunction(TableFunction({LogicalType::VARCHAR}, EmitRows, StatsBind, StatsInit));

@@ -84,6 +84,11 @@ static void TestRewriteHonor() {
 
 	catalog.value = "1.5";
 	Expect(EffectiveRewriteThreshold(0.15, catalog) == 0.15, "out-of-range catalog value ignored");
+
+	catalog.value = "0";
+	Expect(EffectiveRewriteThreshold(0.15, catalog) == 0.15, "catalog 0 is not a lakemon CALL threshold");
+	catalog.value = "0.0";
+	Expect(EffectiveRewriteThreshold(0.15, catalog) == 0.15, "catalog 0.0 is not a lakemon CALL threshold");
 }
 
 static void TestIntervalsAndOverride() {
@@ -134,12 +139,44 @@ static void TestTargetAndHintOverlay() {
 	Expect(hint.auto_compact, "analytics.events has no auto_compact=false");
 }
 
+static void TestCatalogZeroDoesNotEmitRewrite() {
+	FileStat file;
+	file.schema_name = "main";
+	file.table_name = "events";
+	file.data_file_id = 1;
+	file.file_size_bytes = 32 * kMiB;
+	file.record_count = 40000;
+	file.delete_count = 12000;
+	TableHint hint = SummarizeTable(std::vector<FileStat>(1, file));
+	Expect(!hint.rewrite_steps.empty() && hint.rewrite_steps[0].delete_threshold > 0.0,
+	       "ladder planned a positive-threshold rung");
+
+	std::vector<OptionBinding> options;
+	OptionBinding catalog;
+	catalog.name = "rewrite_delete_threshold";
+	catalog.value = "0";
+	catalog.scope = "GLOBAL";
+	options.push_back(catalog);
+	ApplyNativeOptions(hint, options);
+	Expect(hint.rewrite_steps.empty(), "catalog 0 does not emit band=catalog");
+	Expect(hint.rewrite_plan.find("rewrite_delete_threshold<=0") != std::string::npos, "skip reason is explicit");
+	Expect(hint.rewrite_plan.find("ducklake_rewrite_data_files") != std::string::npos,
+	       "skip points at the native CALL");
+	Expect(hint.rewrite_threshold == 0.0, "stats threshold stays unset when rewrite is skipped");
+
+	TableHint again = SummarizeTable(std::vector<FileStat>(1, file));
+	options.back().value = "0.0";
+	ApplyNativeOptions(again, options);
+	Expect(again.rewrite_steps.empty(), "catalog 0.0 also skips rewrite");
+}
+
 int main() {
 	TestPrecedence();
 	TestRewriteHonor();
 	TestIntervalsAndOverride();
 	TestAutoCompact();
 	TestTargetAndHintOverlay();
+	TestCatalogZeroDoesNotEmitRewrite();
 	if (TestFailures()) {
 		std::cerr << TestFailures() << " failure(s)" << std::endl;
 		return 1;

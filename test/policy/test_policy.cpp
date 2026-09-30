@@ -249,6 +249,40 @@ static void TestMaxRewriteStepsCap() {
 	Expect(two[0].band == "high" && two[1].band == "medium", "low is dropped by the cap");
 }
 
+static void TestZeroRatioBandIsSkipped() {
+	FileStat zero = MakeFile(1, 0, 1000, 100);
+	PlannedRewriteStep out;
+	Expect(!FinishRewriteRung(DeleteBand::High, {zero}, 0, out), "min ratio 0 skips the band");
+	Expect(!lakemon::ShouldEmitRewriteCall(0.0), "threshold 0 is never a lakemon rewrite CALL");
+	Expect(!lakemon::ShouldEmitRewriteCall(-0.1), "negative threshold is never a lakemon rewrite CALL");
+	Expect(lakemon::ShouldEmitRewriteCall(0.05), "positive threshold may emit");
+}
+
+static void TestZeroRatioFileDoesNotPoisonPositiveBand() {
+	FileStat dirty = MakeFile(1, 20000, 40000, 100);
+	FileStat zero = MakeFile(2, 0, 1000, 50);
+	PlannedRewriteStep out;
+	Expect(FinishRewriteRung(DeleteBand::High, {dirty, zero}, 0, out), "positive files remain");
+	Expect(out.files.size() == 1 && out.files[0].data_file_id == 1, "zero-ratio file is dropped");
+	Expect(out.delete_threshold > 0.0, "threshold stays positive");
+	Expect(lakemon::ShouldEmitRewriteCall(out.delete_threshold), "remaining rung is emittable");
+}
+
+static void TestPlannedRungsNeverUseZeroThreshold() {
+	const auto files = std::vector<FileStat>{
+	    MakeFile(1, 50000, 1000000, 800000000),
+	    MakeFile(2, 20, 100, 8000),
+	    MakeFile(3, 8000, 10000, 4000000),
+	    MakeFile(4, 0, 10000, 100),
+	};
+	const auto rungs = PlanRewriteRungs(files);
+	Expect(!rungs.empty(), "dirty files still plan");
+	for (const auto &step : rungs) {
+		Expect(step.delete_threshold > 0.0, "no planned rung uses delete_threshold 0");
+		Expect(lakemon::ShouldEmitRewriteCall(step.delete_threshold), "maintain would emit this CALL");
+	}
+}
+
 static void TestSkipBelowLowMin() {
 	const auto files = std::vector<FileStat>{
 	    MakeFile(1, 99, 100, 10),
@@ -366,9 +400,23 @@ static void TestPipelineStepsAreIndependent() {
 	Expect(lakemon::InventoryFailureStopsPipeline(), "hard inventory failure stops rewrite/merge");
 	Expect(!lakemon::FlushErrorSkipsStep("rewrite"), "flush error does not skip rewrite");
 	Expect(!lakemon::FlushErrorSkipsStep("merge"), "flush error does not skip merge");
+	Expect(!lakemon::TableMaintainIncludesRetention(),
+	       "lakemon_maintain must not expire snapshots or clean old/orphan files");
+	Expect(!lakemon::GlobalMaintainIncludesTableWork(),
+	       "lakemon_maintain_global must not flush, rewrite, or merge");
 	Expect(!lakemon::FlushErrorSkipsStep("expire_snapshots"), "flush error does not skip expire");
 	Expect(!lakemon::FlushErrorSkipsStep("cleanup_old_files"), "flush error does not skip cleanup");
 	Expect(!lakemon::FlushErrorSkipsStep("delete_orphaned_files"), "flush error does not skip orphan cleanup");
+}
+
+static void TestGlobalExpireCleanupSkipSemantics() {
+	Expect(std::string(lakemon::ExpireSkipReason(true, false)) == "skip_expire", "skip_expire wins");
+	Expect(std::string(lakemon::ExpireSkipReason(true, true)) == "skip_expire", "skip_expire wins even if unset");
+	Expect(std::string(lakemon::ExpireSkipReason(false, true)) == "expire_older_than not set",
+	       "unset interval skips expire");
+	Expect(lakemon::ExpireSkipReason(false, false) == nullptr, "set interval runs expire");
+	Expect(!lakemon::ShouldRunCleanup(true), "skip_cleanup skips old-file and orphan cleanup");
+	Expect(lakemon::ShouldRunCleanup(false), "cleanup runs unless skipped");
 }
 
 static void TestFormatInventoryDiagnosticsJoinsAll() {
@@ -403,6 +451,9 @@ int main() {
 	TestZeroRecordFileWithDeletesHasRatioOne();
 	TestInvalidLadderFailsClosed();
 	TestMaxRewriteStepsCap();
+	TestZeroRatioBandIsSkipped();
+	TestZeroRatioFileDoesNotPoisonPositiveBand();
+	TestPlannedRungsNeverUseZeroThreshold();
 	TestSkipBelowLowMin();
 	TestMinRatioThresholdPerRung();
 	TestDeletedBytesUsesCount();
@@ -411,6 +462,7 @@ int main() {
 	TestTableHintMerge();
 	TestOneFileDoesNotHintMerge();
 	TestPipelineStepsAreIndependent();
+	TestGlobalExpireCleanupSkipSemantics();
 	TestFormatInventoryDiagnosticsJoinsAll();
 	if (TestFailures()) {
 		std::cerr << TestFailures() << " failure(s)" << std::endl;

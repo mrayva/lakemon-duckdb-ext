@@ -89,4 +89,25 @@ inline std::string RewriteDataFilesCall(const std::string &catalog, const TableR
 	return sql.str();
 }
 
+inline std::string ExpireSnapshotsCall(const std::string &catalog, const std::string &older_than) {
+	return "CALL ducklake_expire_snapshots(" + QuoteString(catalog) + ", older_than => now() - INTERVAL " +
+	       QuoteString(older_than) + ")";
+}
+
+inline std::string CleanupOldFilesCall(const std::string &catalog, const std::string &older_than) {
+	std::ostringstream sql;
+	sql << "CALL ducklake_cleanup_old_files(" << QuoteString(catalog);
+	if (!older_than.empty()) {
+		sql << ", older_than => now() - INTERVAL " << QuoteString(older_than);
+	} else {
+		sql << ", cleanup_all => true";
+	}
+	sql << ")";
+	return sql.str();
+}
+
+inline std::string DeleteOrphanedFilesCall(const std::string &catalog) {
+	return "CALL ducklake_delete_orphaned_files(" + QuoteString(catalog) + ")";
+}
+
 } // namespace lakemon

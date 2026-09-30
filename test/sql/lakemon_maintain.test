@@ -1,5 +1,5 @@
 # name: test/sql/lakemon_maintain.test
-# description: bind/error smoke for maintain and table stats
+# description: bind/error smoke for table maintain, global maintain, and table stats
 # group: [sql]
 
 require lakemon
@@ -15,18 +15,100 @@ SELECT count(*) FROM lakemon_maintain('no_such_lake') WHERE details LIKE '%lakem
 ----
 1
 
-# Named knobs bind; failure is still an inventory error row, not a bind crash.
+# Table named knobs bind; failure is still an inventory error row, not a bind crash.
 query II
-SELECT step, status FROM lakemon_maintain('no_such_lake', dry_run => true, skip_expire => true, skip_cleanup => true);
+SELECT step, status FROM lakemon_maintain('no_such_lake', dry_run => true, max_compacted_files => 4);
 ----
 inventory	error
 
 query II
-SELECT step, status FROM lakemon_maintain('no_such_lake', 'main.events', max_compacted_files => 4, expire_older_than => '7 days');
+SELECT step, status FROM lakemon_maintain('no_such_lake', 'main.events', max_compacted_files => 4);
 ----
 inventory	error
 
-# Session remains usable after the inventory error rows.
+# Retention named params moved to lakemon_maintain_global (bind error, not execute).
+statement error
+CALL lakemon_maintain('no_such_lake', skip_expire => true);
+----
+skip_expire
+
+statement error
+CALL lakemon_maintain('no_such_lake', skip_cleanup => true);
+----
+skip_cleanup
+
+statement error
+CALL lakemon_maintain('no_such_lake', expire_older_than => '7 days');
+----
+expire_older_than
+
+statement error
+CALL lakemon_maintain('no_such_lake', delete_older_than => '3 days');
+----
+delete_older_than
+
+# Catalog-global CALL is registered. Skip both retention steps without executing DuckLake.
+query II
+SELECT step, status FROM lakemon_maintain_global('no_such_lake', skip_expire => true, skip_cleanup => true)
+WHERE step IN ('expire_snapshots', 'cleanup_old_files')
+ORDER BY step;
+----
+cleanup_old_files	skip
+expire_snapshots	skip
+
+# dry_run plans expire/cleanup SQL without requiring an attached catalog.
+query II
+SELECT step, status FROM lakemon_maintain_global('no_such_lake', dry_run => true, expire_older_than => '7 days', skip_cleanup => true)
+WHERE step = 'expire_snapshots';
+----
+expire_snapshots	planned
+
+query I
+SELECT count(*) FROM lakemon_maintain_global('no_such_lake', dry_run => true, expire_older_than => '7 days', skip_cleanup => true)
+WHERE step = 'expire_snapshots' AND details LIKE '%ducklake_expire_snapshots%';
+----
+1
+
+query II
+SELECT step, status FROM lakemon_maintain_global('no_such_lake', dry_run => true, skip_expire => true, delete_older_than => '3 days')
+WHERE step IN ('cleanup_old_files', 'delete_orphaned_files')
+ORDER BY step;
+----
+cleanup_old_files	planned
+delete_orphaned_files	planned
+
+query I
+SELECT count(*) FROM lakemon_maintain_global('no_such_lake', dry_run => true, skip_expire => true)
+WHERE step = 'cleanup_old_files' AND details LIKE '%ducklake_cleanup_old_files%' AND details LIKE '%cleanup_all%';
+----
+1
+
+query I
+SELECT count(*) FROM lakemon_maintain_global('no_such_lake', dry_run => true, skip_expire => true)
+WHERE step = 'delete_orphaned_files' AND details LIKE '%ducklake_delete_orphaned_files%';
+----
+1
+
+# Execute path: missing catalog becomes status=error rows, session stays usable.
+query II
+SELECT step, status FROM lakemon_maintain_global('no_such_lake', expire_older_than => '7 days', skip_cleanup => true)
+WHERE step = 'expire_snapshots';
+----
+expire_snapshots	error
+
+# Table-only knobs do not bind on the global CALL.
+statement error
+CALL lakemon_maintain_global('no_such_lake', max_compacted_files => 4);
+----
+max_compacted_files
+
+# Global CALL is catalog-only (no table argument).
+statement error
+CALL lakemon_maintain_global('no_such_lake', 'main.events');
+----
+lakemon_maintain_global
+
+# Session remains usable after the inventory / global error rows.
 query I
 SELECT lakemon_version();
 ----
@@ -41,8 +123,14 @@ lakemon:
 # Empty catalog is a bind error, not process death.
 # Live option honor (rewrite_delete_threshold / target_file_size / expire_older_than /
 # delete_older_than / auto_compact) needs an attached DuckLake; see README Tests.
+# Planner: delete_threshold <= 0 never emits a rewrite CALL (policy-test).
 statement error
 CALL lakemon_maintain('');
+----
+lakemon:
+
+statement error
+CALL lakemon_maintain_global('');
 ----
 lakemon:
 

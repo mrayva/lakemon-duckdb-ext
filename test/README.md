@@ -17,6 +17,6 @@ make test
 SQL logic tests under `test/sql/`:
 
 - `lakemon.test` — version + `lakemon_policy` rewrite ladder / merge tiers + `lakemon_set_policy` persist/read
-- `lakemon_maintain.test` — bind errors when no DuckLake catalog is attached
+- `lakemon_maintain.test` — bind errors when no DuckLake catalog is attached; `lakemon_maintain_global` skip/plan/error rows; retention named params rejected on table maintain
 
 These do not create a DuckLake catalog. Attach your own lake to exercise rewrite/merge end-to-end.

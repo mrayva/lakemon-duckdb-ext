@@ -8,9 +8,17 @@
 
 namespace lakemon {
 
+// Table-scoped maintain: inventory, flush, adaptive rewrite, merge.
 struct MaintainOptions {
 	std::string catalog;
 	TableRef table;
+	bool dry_run = false;
+	int64_t max_compacted_files = 0;
+};
+
+// Catalog-global retention: expire snapshots, old-file cleanup, orphan delete.
+struct GlobalMaintainOptions {
+	std::string catalog;
 	bool dry_run = false;
 	bool skip_expire = false;
 	bool skip_cleanup = false;
@@ -18,7 +26,6 @@ struct MaintainOptions {
 	std::string delete_older_than;
 	bool expire_older_than_set = false;
 	bool delete_older_than_set = false;
-	int64_t max_compacted_files = 0;
 };
 
 struct MaintainRow {
@@ -33,5 +40,6 @@ struct MaintainRow {
 };
 
 std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const MaintainOptions &options);
+std::vector<MaintainRow> RunGlobalMaintain(duckdb::ClientContext &context, const GlobalMaintainOptions &options);
 
 } // namespace lakemon

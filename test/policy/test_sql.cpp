@@ -1,4 +1,5 @@
 #include "expect.hpp"
+#include "lakemon_pipeline.hpp"
 #include "lakemon_sql.hpp"
 
 #include <iostream>
@@ -60,11 +61,41 @@ static void TestRewriteMergeKeepPositionalTableAndSchema() {
 	       "rewrite CALL keeps positional table plus data-driven threshold");
 }
 
+static void TestGlobalRetentionCallsAreCatalogOnly() {
+	Expect(lakemon::ExpireSnapshotsCall("lake", "7 days") ==
+	           "CALL ducklake_expire_snapshots('lake', older_than => now() - INTERVAL '7 days')",
+	       "expire snapshots is catalog-global");
+	Expect(lakemon::CleanupOldFilesCall("lake", "3 days") ==
+	           "CALL ducklake_cleanup_old_files('lake', older_than => now() - INTERVAL '3 days')",
+	       "cleanup uses older_than when set");
+	Expect(lakemon::CleanupOldFilesCall("lake", "") == "CALL ducklake_cleanup_old_files('lake', cleanup_all => true)",
+	       "cleanup_all when delete interval unset");
+	Expect(lakemon::DeleteOrphanedFilesCall("lake") == "CALL ducklake_delete_orphaned_files('lake')",
+	       "orphan delete is catalog-global");
+	Expect(!Contains(lakemon::ExpireSnapshotsCall("lake", "7 days"), "table"), "expire has no table argument");
+	Expect(!Contains(lakemon::FlushInlinedDataCall("lake", lakemon::ParseTableRef("s.t")), "expire"),
+	       "table flush CALL does not expire snapshots");
+}
+
+static void TestRewriteCallNeverUsesZeroThreshold() {
+	lakemon::TableRef ref;
+	ref.schema = "main";
+	ref.table = "events";
+	Expect(lakemon::ShouldEmitRewriteCall(0.05), "positive threshold may emit");
+	Expect(!lakemon::ShouldEmitRewriteCall(0.0), "lakemon must not emit delete_threshold 0");
+	Expect(!lakemon::ShouldEmitRewriteCall(0), "integer 0 must not emit");
+	const std::string sql = lakemon::RewriteDataFilesCall("lake", ref, 0.05);
+	Expect(Contains(sql, "delete_threshold => 0.05"), "positive CALL keeps the derived threshold");
+	Expect(!Contains(sql, "delete_threshold => 0)"), "generated SQL is not a zero-threshold CALL");
+}
+
 int main() {
 	TestFlushSchemaQualifiedUsesNamedArgs();
 	TestFlushCatalogOnlyOmitsTable();
 	TestFlushMainAndEmptySchemaOmitSchemaName();
 	TestRewriteMergeKeepPositionalTableAndSchema();
+	TestGlobalRetentionCallsAreCatalogOnly();
+	TestRewriteCallNeverUsesZeroThreshold();
 	if (TestFailures()) {
 		std::cerr << TestFailures() << " failure(s)" << std::endl;
 		return 1;

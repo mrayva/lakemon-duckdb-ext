@@ -2,6 +2,7 @@
 
 #include "lakemon_catalog.hpp"
 #include "lakemon_compat.hpp"
+#include "lakemon_pipeline.hpp"
 #include "lakemon_policy.hpp"
 #include "lakemon_store.hpp"
 
@@ -38,11 +39,11 @@ static int64_t CountResultRows(duckdb::ClientContext &context, const std::string
 	return static_cast<int64_t>(result->RowCount());
 }
 
-static void AppendCall(std::vector<MaintainRow> &rows, duckdb::ClientContext &context, const MaintainOptions &options,
+static void AppendCall(std::vector<MaintainRow> &rows, duckdb::ClientContext &context, bool dry_run,
                        const std::string &step, const std::string &action, const std::string &sql,
                        const std::string &schema, const std::string &table, const std::string &details,
                        int64_t processed = 0) {
-	if (options.dry_run) {
+	if (dry_run) {
 		rows.push_back(MakeRow(step, schema, table, action, "planned", processed, 0, details + " | " + sql));
 		return;
 	}
@@ -77,8 +78,9 @@ static void AppendRewriteSkips(std::vector<MaintainRow> &rows, const policy::Tab
 // Inventory hard-failure: status=error row(s), then stop (do not CALL rewrite/merge
 // against an unread catalog). Unread per-table metadata: status=error diagnostic
 // rows; continue with tables that were read. After inventory succeeds, flush,
-// rewrite, merge, expire, and cleanup are independent: a flush_inlined error is
-// recorded and rewrite/merge still run. InterruptException and bad_alloc rethrow.
+// rewrite, and merge are independent: a flush_inlined error is recorded and
+// rewrite/merge still run. Expire / old-file / orphan cleanup are not part of
+// this CALL (see RunGlobalMaintain). InterruptException and bad_alloc rethrow.
 // The session stays usable.
 std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const MaintainOptions &options) {
 	std::vector<MaintainRow> rows;
@@ -129,14 +131,8 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	}
 
 	const bool catalog_wide = options.table.table.empty();
-	const std::string expire_interval = policy::EffectiveInterval(
-	    options.expire_older_than_set, options.expire_older_than,
-	    policy::ResolveOption(catalog_options, "expire_older_than", "", ""));
-	const std::string delete_interval = policy::EffectiveInterval(
-	    options.delete_older_than_set, options.delete_older_than,
-	    policy::ResolveOption(catalog_options, "delete_older_than", "", ""));
 
-	AppendCall(rows, context, options, "flush_inlined", "ducklake_flush_inlined_data",
+	AppendCall(rows, context, options.dry_run, "flush_inlined", "ducklake_flush_inlined_data",
 	           FlushInlinedDataCall(options.catalog, options.table), options.table.schema, options.table.table,
 	           "flush inlined rows before rewrite/merge");
 
@@ -153,7 +149,14 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			continue;
 		}
 		for (const auto &step : hint.rewrite_steps) {
-			AppendCall(rows, context, options, "rewrite", step.band,
+			if (!ShouldEmitRewriteCall(step.delete_threshold)) {
+				rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, step.band, "skip",
+				                       static_cast<int64_t>(step.files.size()), 0,
+				                       policy::FormatRewriteStepDetails(step) + " | " +
+				                           policy::kSkipNonPositiveRewriteThreshold));
+				continue;
+			}
+			AppendCall(rows, context, options.dry_run, "rewrite", step.band,
 			           RewriteDataFilesCall(options.catalog, ref, step.delete_threshold), hint.schema_name,
 			           hint.table_name, policy::FormatRewriteStepDetails(step),
 			           static_cast<int64_t>(step.files.size()));
@@ -222,42 +225,11 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			merge_sql << "CALL ducklake_merge_adjacent_files(" << QuoteString(options.catalog) << TableArg(ref)
 			          << SchemaNamed(ref) << ", min_file_size => " << tier.min_file_size
 			          << ", max_file_size => " << tier.max_file_size << ", max_compacted_files => " << cap << ")";
-			AppendCall(rows, context, options, "merge", std::string("tier_") + tier.name, merge_sql.str(),
+			AppendCall(rows, context, options.dry_run, "merge", std::string("tier_") + tier.name, merge_sql.str(),
 			           hint.schema_name, hint.table_name,
 			           std::string("band ") + std::to_string(tier.min_file_size) + "-" +
 			               std::to_string(tier.max_file_size) + " -> " + target);
 		}
-	}
-
-	if (!options.skip_expire && !expire_interval.empty()) {
-		std::ostringstream sql;
-		sql << "CALL ducklake_expire_snapshots(" << QuoteString(options.catalog) << ", older_than => now() - INTERVAL "
-		    << QuoteString(expire_interval) << ")";
-		AppendCall(rows, context, options, "expire_snapshots", "expire", sql.str(), "", "",
-		           "older_than=" + expire_interval);
-	} else {
-		rows.push_back(MakeRow("expire_snapshots", "", "", "expire", "skip", 0, 0,
-		                       options.skip_expire ? "skip_expire" : "expire_older_than not set"));
-	}
-
-	if (!options.skip_cleanup) {
-		std::ostringstream sql;
-		sql << "CALL ducklake_cleanup_old_files(" << QuoteString(options.catalog);
-		if (!delete_interval.empty()) {
-			sql << ", older_than => now() - INTERVAL " << QuoteString(delete_interval);
-		} else {
-			sql << ", cleanup_all => true";
-		}
-		sql << ")";
-		AppendCall(rows, context, options, "cleanup_old_files", "cleanup", sql.str(), "", "",
-		           delete_interval.empty() ? "cleanup_all" : "older_than=" + delete_interval);
-
-		std::ostringstream orphan;
-		orphan << "CALL ducklake_delete_orphaned_files(" << QuoteString(options.catalog) << ")";
-		AppendCall(rows, context, options, "delete_orphaned_files", "cleanup", orphan.str(), "", "",
-		           "remove unreferenced files");
-	} else {
-		rows.push_back(MakeRow("cleanup_old_files", "", "", "cleanup", "skip", 0, 0, "skip_cleanup"));
 	}
 
 	return rows;
@@ -272,6 +244,69 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	} catch (const std::exception &ex) {
 		rows.push_back(MakeRow("maintain", options.table.schema, options.table.table, "orchestrate", "error", 0, 0,
 		                       SafeWhat(ex)));
+		return rows;
+	}
+}
+
+// Catalog-global retention only. Options load is best-effort: unread intervals
+// fall back to named params (or skip expire / cleanup_all). Expire and cleanup
+// are independent of each other and of table maintain. The session stays usable.
+std::vector<MaintainRow> RunGlobalMaintain(duckdb::ClientContext &context, const GlobalMaintainOptions &options) {
+	std::vector<MaintainRow> rows;
+	std::string options_error;
+	std::vector<policy::OptionBinding> catalog_options;
+	try {
+		catalog_options = LoadCatalogOptions(context, options.catalog, &options_error);
+	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
+	} catch (const Exception &ex) {
+		rows.push_back(MakeRow("catalog_options", "", "", "ducklake_options", "error", 0, 0, SafeWhat(ex)));
+	} catch (const std::exception &ex) {
+		rows.push_back(MakeRow("catalog_options", "", "", "ducklake_options", "error", 0, 0, SafeWhat(ex)));
+	}
+
+	try {
+		if (!options_error.empty()) {
+			rows.push_back(MakeRow("catalog_options", "", "", "ducklake_options", "error", 0, 0, options_error));
+		}
+
+		const std::string expire_interval = policy::EffectiveInterval(
+		    options.expire_older_than_set, options.expire_older_than,
+		    policy::ResolveOption(catalog_options, "expire_older_than", "", ""));
+		const std::string delete_interval = policy::EffectiveInterval(
+		    options.delete_older_than_set, options.delete_older_than,
+		    policy::ResolveOption(catalog_options, "delete_older_than", "", ""));
+
+		if (const char *skip = ExpireSkipReason(options.skip_expire, expire_interval.empty())) {
+			rows.push_back(MakeRow("expire_snapshots", "", "", "expire", "skip", 0, 0, skip));
+		} else {
+			AppendCall(rows, context, options.dry_run, "expire_snapshots", "expire",
+			           ExpireSnapshotsCall(options.catalog, expire_interval), "", "",
+			           "older_than=" + expire_interval);
+		}
+
+		if (!ShouldRunCleanup(options.skip_cleanup)) {
+			rows.push_back(MakeRow("cleanup_old_files", "", "", "cleanup", "skip", 0, 0, "skip_cleanup"));
+		} else {
+			AppendCall(rows, context, options.dry_run, "cleanup_old_files", "cleanup",
+			           CleanupOldFilesCall(options.catalog, delete_interval), "", "",
+			           delete_interval.empty() ? "cleanup_all" : "older_than=" + delete_interval);
+			AppendCall(rows, context, options.dry_run, "delete_orphaned_files", "cleanup",
+			           DeleteOrphanedFilesCall(options.catalog), "", "", "remove unreferenced files");
+		}
+
+		return rows;
+	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
+	} catch (const Exception &ex) {
+		rows.push_back(MakeRow("maintain_global", "", "", "orchestrate", "error", 0, 0, SafeWhat(ex)));
+		return rows;
+	} catch (const std::exception &ex) {
+		rows.push_back(MakeRow("maintain_global", "", "", "orchestrate", "error", 0, 0, SafeWhat(ex)));
 		return rows;
 	}
 }
