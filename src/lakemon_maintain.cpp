@@ -149,6 +149,13 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 			continue;
 		}
 		for (const auto &step : hint.rewrite_steps) {
+			if (!ShouldEmitRewriteCall(step.delete_threshold)) {
+				rows.push_back(MakeRow("rewrite", hint.schema_name, hint.table_name, step.band, "skip",
+				                       static_cast<int64_t>(step.files.size()), 0,
+				                       policy::FormatRewriteStepDetails(step) + " | " +
+				                           policy::kSkipNonPositiveRewriteThreshold));
+				continue;
+			}
 			AppendCall(rows, context, options.dry_run, "rewrite", step.band,
 			           RewriteDataFilesCall(options.catalog, ref, step.delete_threshold), hint.schema_name,
 			           hint.table_name, policy::FormatRewriteStepDetails(step),

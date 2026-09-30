@@ -1,4 +1,5 @@
 #include "expect.hpp"
+#include "lakemon_pipeline.hpp"
 #include "lakemon_sql.hpp"
 
 #include <iostream>
@@ -76,12 +77,25 @@ static void TestGlobalRetentionCallsAreCatalogOnly() {
 	       "table flush CALL does not expire snapshots");
 }
 
+static void TestRewriteCallNeverUsesZeroThreshold() {
+	lakemon::TableRef ref;
+	ref.schema = "main";
+	ref.table = "events";
+	Expect(lakemon::ShouldEmitRewriteCall(0.05), "positive threshold may emit");
+	Expect(!lakemon::ShouldEmitRewriteCall(0.0), "lakemon must not emit delete_threshold 0");
+	Expect(!lakemon::ShouldEmitRewriteCall(0), "integer 0 must not emit");
+	const std::string sql = lakemon::RewriteDataFilesCall("lake", ref, 0.05);
+	Expect(Contains(sql, "delete_threshold => 0.05"), "positive CALL keeps the derived threshold");
+	Expect(!Contains(sql, "delete_threshold => 0)"), "generated SQL is not a zero-threshold CALL");
+}
+
 int main() {
 	TestFlushSchemaQualifiedUsesNamedArgs();
 	TestFlushCatalogOnlyOmitsTable();
 	TestFlushMainAndEmptySchemaOmitSchemaName();
 	TestRewriteMergeKeepPositionalTableAndSchema();
 	TestGlobalRetentionCallsAreCatalogOnly();
+	TestRewriteCallNeverUsesZeroThreshold();
 	if (TestFailures()) {
 		std::cerr << TestFailures() << " failure(s)" << std::endl;
 		return 1;

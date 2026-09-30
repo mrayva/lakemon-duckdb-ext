@@ -89,7 +89,7 @@ Table work only. Does **not** run `ducklake_expire_snapshots`, `ducklake_cleanup
 
 `table` may be `table` (schema `main`) or `schema.table`. Catalog-wide `CALL lakemon_maintain('lake')` still loops tables for flush / rewrite / merge only.
 
-Named parameters override table-scoped work for that invocation. Catalog-wide maintain skips tables with `auto_compact = false`; an explicit table argument still maintains that table. When DuckLake `rewrite_delete_threshold` is set (table → schema → global), lakemon emits **one** rewrite `CALL` with that value (full override of per-band thresholds and CALL count). Files already planned stay in that one step; `max_rewrite_steps` / `byte_budget` have already been applied, and files below `low_min` stay skipped. Otherwise each planned delete-count band is its own `ducklake_rewrite_data_files` `CALL`. `target_file_size` informs the merge target and is not overwritten when already set on the catalog.
+Named parameters override table-scoped work for that invocation. Catalog-wide maintain skips tables with `auto_compact = false`; an explicit table argument still maintains that table. When DuckLake `rewrite_delete_threshold` is set in **(0, 1]** (table → schema → global), lakemon emits **one** rewrite `CALL` with that value (full override of per-band thresholds and CALL count). If the catalog value is **<= 0**, rewrite is skipped for that table this cycle (flush and merge still run); lakemon never emits `delete_threshold` 0.0. Files already planned stay in that one step; `max_rewrite_steps` / `byte_budget` have already been applied, and files below `low_min` stay skipped. Otherwise each planned delete-count band is its own `ducklake_rewrite_data_files` `CALL`. `target_file_size` informs the merge target and is not overwritten when already set on the catalog.
 
 Execution order:
 
@@ -167,7 +167,9 @@ Precedence for maintain/stats: **built-in defaults → persisted lakemon policy 
 
 Files are **not** split into equal-width `delete_threshold` steps (`0.1`, `0.2`, …) or equal-count / equal-byte chunks. Those group a tiny high-ratio file with a large high-churn file — or rank the tiny file first.
 
-Instead, each file is bucketed by **absolute delete count**. High runs first. File size is only a secondary sort and an optional per-rung `byte_budget`. Each rung derives `delete_threshold` as the **minimum delete ratio** of the files in that band so the native `CALL` can reach them. A table with files in more than one band emits **one `ducklake_rewrite_data_files` per band** (capped by `max_rewrite_steps`).
+Instead, each file is bucketed by **absolute delete count**. High runs first. File size is only a secondary sort and an optional per-rung `byte_budget`. Each rung derives `delete_threshold` as the **minimum delete ratio** of the files in that band so the native `CALL` can reach them. A band whose min ratio is **<= 0** is skipped (no planned or executed rewrite row). A table with files in more than one remaining band emits **one `ducklake_rewrite_data_files` per band** (capped by `max_rewrite_steps`).
+
+lakemon **never** uses `delete_threshold` 0.0 — that native threshold matches every file in the table, including ones with no deletes. If you still want a zero threshold, call DuckLake directly: `CALL ducklake_rewrite_data_files('lake', 't', delete_threshold => 0)`.
 
 | Band | Default floor | Order |
 | --- | --- | --- |
@@ -192,6 +194,7 @@ Files ≥ 64 MiB are left alone.
 ## Tips
 
 - **Partial maintain.** For a single table step, call the native DuckLake functions directly (`ducklake_flush_inlined_data`, `ducklake_rewrite_data_files`, `ducklake_merge_adjacent_files`). For expire + old-file / orphan cleanup, use `CALL lakemon_maintain_global('lake')` or the native `ducklake_expire_snapshots` / `ducklake_cleanup_old_files` / `ducklake_delete_orphaned_files` CALLs. `lakemon_maintain` is the orchestrated table pass (ladder + merge bands). Plan with `lakemon_table_stats` and `dry_run => true`. If `flush_inlined` fails, rewrite and merge still run; each step records its own `ok` / `skip` / `error`.
+- **Zero rewrite threshold.** lakemon never plans or executes `ducklake_rewrite_data_files` with `delete_threshold` 0.0 (or <= 0). Use the native `CALL ducklake_rewrite_data_files(..., delete_threshold => 0)` if you need that.
 - **Large backlog.** No wall-clock budget in lakemon today. Prefer one table (`CALL lakemon_maintain('lake', 'schema.t')`) then `CALL lakemon_maintain_global('lake')`, tighter policy via `lakemon_set_policy` / DuckLake `set_option`, or native `CALL`s with file caps (`max_compacted_files`). An unbounded full-catalog table pass can run a long time; escape hatch is per-table / native steps. Expire and orphan cleanup are catalog-global and do not need a per-table loop.
 
 ## Building

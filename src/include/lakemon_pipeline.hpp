@@ -43,4 +43,10 @@ inline bool ShouldRunCleanup(bool skip_cleanup) {
 	return !skip_cleanup;
 }
 
+// ducklake_rewrite_data_files with delete_threshold 0 matches every file.
+// lakemon never plans or executes that CALL.
+inline bool ShouldEmitRewriteCall(double delete_threshold) {
+	return delete_threshold > 0.0;
+}
+
 } // namespace lakemon

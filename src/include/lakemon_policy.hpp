@@ -221,6 +221,15 @@ inline bool InUnitInterval(double value) noexcept {
 	return value >= 0.0 && value <= 1.0;
 }
 
+// Native ducklake_rewrite_data_files delete_threshold must be in (0, 1].
+// 0.0 matches every file (including those with no deletes).
+inline bool PositiveRewriteThreshold(double value) noexcept {
+	return value > 0.0 && value <= 1.0;
+}
+
+static constexpr const char *kSkipNonPositiveRewriteThreshold =
+    "rewrite_delete_threshold<=0; use native CALL ducklake_rewrite_data_files(..., delete_threshold => 0)";
+
 inline bool ValidateMergeTier(const MergeTier &tier, std::string &error) {
 	if (tier.name.empty()) {
 		error = "lakemon: merge tier name is required";
@@ -540,6 +549,14 @@ inline bool FinishRewriteRung(DeleteBand band, std::vector<FileStat> files, uint
 		return a.data_file_id < b.data_file_id;
 	});
 	files = TakeWithinBudget(std::move(files), byte_budget);
+	std::vector<FileStat> positive;
+	positive.reserve(files.size());
+	for (auto &file : files) {
+		if (DeleteRatio(file) > 0.0) {
+			positive.push_back(std::move(file));
+		}
+	}
+	files = std::move(positive);
 	if (files.empty()) {
 		return false;
 	}
@@ -550,6 +567,9 @@ inline bool FinishRewriteRung(DeleteBand band, std::vector<FileStat> files, uint
 		threshold = std::min(threshold, DeleteRatio(file));
 		planned_bytes += file.file_size_bytes;
 		planned_deletes += file.delete_count;
+	}
+	if (!PositiveRewriteThreshold(threshold)) {
+		return false;
 	}
 	out.band = DeleteBandName(band);
 	out.files = std::move(files);
@@ -693,31 +713,42 @@ inline void RefreshRewritePlan(TableHint &hint) {
 }
 
 // Overlay native DuckLake options (table → schema → global) on a table hint.
-// rewrite_delete_threshold, when set, is a FULL override: one band=catalog CALL
-// with that threshold. max_rewrite_steps and per-rung byte_budget do not apply
-// after collapse (they already shaped the planned rungs; collapse does not
-// re-budget or emit extra CALLs). Files below low_min were filtered before
-// collapse and stay out. auto_compact is honored by maintain.
+// rewrite_delete_threshold, when set in (0, 1], is a FULL override: one
+// band=catalog CALL with that threshold. A catalog value <= 0 skips rewrite
+// (lakemon never emits delete_threshold 0.0). max_rewrite_steps and per-rung
+// byte_budget do not apply after collapse (they already shaped the planned
+// rungs; collapse does not re-budget or emit extra CALLs). Files below low_min
+// were filtered before collapse and stay out. auto_compact is honored by maintain.
 inline void ApplyNativeOptions(TableHint &hint, const std::vector<OptionBinding> &options) {
 	const ResolvedOption rewrite =
 	    ResolveOption(options, "rewrite_delete_threshold", hint.schema_name, hint.table_name);
 	double catalog_value = 0;
-	if (rewrite.found && TryParseDouble(rewrite.value, catalog_value) && InUnitInterval(catalog_value) &&
-	    !hint.rewrite_steps.empty()) {
-		PlannedRewriteStep step;
-		step.band = "catalog";
-		step.delete_threshold = catalog_value;
-		for (const auto &existing : hint.rewrite_steps) {
-			for (const auto &file : existing.files) {
-				step.files.push_back(file);
-				step.planned_bytes += file.file_size_bytes;
-				step.planned_deletes += file.delete_count;
+	bool skip_non_positive = false;
+	if (rewrite.found && TryParseDouble(rewrite.value, catalog_value)) {
+		if (catalog_value <= 0.0) {
+			hint.rewrite_steps.clear();
+			skip_non_positive = true;
+		} else if (PositiveRewriteThreshold(catalog_value) && !hint.rewrite_steps.empty()) {
+			PlannedRewriteStep step;
+			step.band = "catalog";
+			step.delete_threshold = catalog_value;
+			for (const auto &existing : hint.rewrite_steps) {
+				for (const auto &file : existing.files) {
+					step.files.push_back(file);
+					step.planned_bytes += file.file_size_bytes;
+					step.planned_deletes += file.delete_count;
+				}
 			}
+			hint.rewrite_steps.clear();
+			hint.rewrite_steps.push_back(std::move(step));
 		}
-		hint.rewrite_steps.clear();
-		hint.rewrite_steps.push_back(std::move(step));
 	}
-	RefreshRewritePlan(hint);
+	if (skip_non_positive) {
+		hint.rewrite_plan = kSkipNonPositiveRewriteThreshold;
+		hint.rewrite_threshold = 0.0;
+	} else {
+		RefreshRewritePlan(hint);
+	}
 	const ResolvedOption compact = ResolveOption(options, "auto_compact", hint.schema_name, hint.table_name);
 	hint.auto_compact = EffectiveAutoCompact(compact);
 	const ResolvedOption target = ResolveOption(options, "target_file_size", hint.schema_name, hint.table_name);

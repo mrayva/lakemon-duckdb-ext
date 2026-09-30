@@ -123,6 +123,7 @@ lakemon:
 # Empty catalog is a bind error, not process death.
 # Live option honor (rewrite_delete_threshold / target_file_size / expire_older_than /
 # delete_older_than / auto_compact) needs an attached DuckLake; see README Tests.
+# Planner: delete_threshold <= 0 never emits a rewrite CALL (policy-test).
 statement error
 CALL lakemon_maintain('');
 ----

@@ -133,12 +133,13 @@ inline bool TryParseBool(const std::string &raw, bool &out) noexcept {
 	return false;
 }
 
-// Catalog rewrite_delete_threshold, when set, is the value passed to
+// Catalog rewrite_delete_threshold, when set in (0, 1], is the value passed to
 // ducklake_rewrite_data_files (operator configured once). ApplyNativeOptions
-// then collapses planned rungs to a single CALL. Otherwise use the ladder.
+// then collapses planned rungs to a single CALL. 0 / negative is not a lakemon
+// CALL threshold (full-table rewrite); ApplyNativeOptions skips rewrite instead.
 inline double EffectiveRewriteThreshold(double ladder_threshold, const ResolvedOption &catalog) noexcept {
 	double catalog_value = 0;
-	if (catalog.found && TryParseDouble(catalog.value, catalog_value) && catalog_value >= 0.0 &&
+	if (catalog.found && TryParseDouble(catalog.value, catalog_value) && catalog_value > 0.0 &&
 	    catalog_value <= 1.0) {
 		return catalog_value;
 	}
