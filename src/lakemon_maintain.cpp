@@ -122,7 +122,8 @@ std::vector<MaintainRow> RunMaintain(duckdb::ClientContext &context, const Maint
 	}
 
 	rows.push_back(MakeRow("inventory", "", "", "catalog_select", "ok", static_cast<int64_t>(files.size()),
-	                       static_cast<int64_t>(hints.size()), "adaptive delete-count rewrite ladder + merge size bands"));
+	                       static_cast<int64_t>(hints.size()),
+	                       "byte-weighted adaptive rewrite ladder + merge size bands"));
 	if (!options_error.empty()) {
 		rows.push_back(MakeRow("catalog_options", "", "", "ducklake_options", "error", 0, 0, options_error));
 	}

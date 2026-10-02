@@ -6,7 +6,7 @@ DuckDB community extension that runs **smart DuckLake maintenance** from SQL.
 
 - **`CALL lakemon_maintain`** — table work: inventory, flush inlined data, adaptive rewrite, merge
 - **`CALL lakemon_maintain_global`** — catalog-global retention: expire snapshots, old-file cleanup, orphan delete
-- an **adaptive delete-count rewrite ladder** (High / Medium / Low bands by absolute delete count, one native `CALL` per band; `delete_threshold` is the min ratio in that band, not a fixed equal-width ratio ladder)
+- a **byte-weighted adaptive rewrite ladder** (files with deletes, worst delete-fraction first; up to `max_rewrite_steps` native `CALL`s whose `delete_threshold` values are cut when cumulative `file_size_bytes` crosses `total_bytes * i/N`)
 - **merge size bands** (micro / small / medium) with per-tier `target_file_size`
 - **catalog SELECT** inventory via DuckLake metadata (`__ducklake_metadata_<catalog>` or `ducklake_table_info` / `ducklake_list_files`)
 - **execute-by-default** (`dry_run => true` to plan only)
@@ -73,7 +73,7 @@ CALL lakemon_policy();
 -- Effective policy for a catalog (defaults + persisted overrides)
 CALL lakemon_policy('lake');
 -- Persist ladder / band overrides (current DuckDB database, keyed by catalog)
-CALL lakemon_set_policy('lake', 'rewrite_ladder', 'default', high_min => 20000, max_rewrite_steps => 2);
+CALL lakemon_set_policy('lake', 'rewrite_ladder', 'default', max_rewrite_steps => 4);
 CALL lakemon_set_policy('lake', 'merge_tier', 'micro', target_file_size => '8MB');
 SELECT lakemon_version();
 ```
@@ -89,18 +89,18 @@ Table work only. Does **not** run `ducklake_expire_snapshots`, `ducklake_cleanup
 
 `table` may be `table` (schema `main`) or `schema.table`. Catalog-wide `CALL lakemon_maintain('lake')` still loops tables for flush / rewrite / merge only.
 
-Named parameters override table-scoped work for that invocation. Catalog-wide maintain skips tables with `auto_compact = false`; an explicit table argument still maintains that table. When DuckLake `rewrite_delete_threshold` is set in **(0, 1]** (table → schema → global), lakemon emits **one** rewrite `CALL` with that value (full override of per-band thresholds and CALL count). If the catalog value is **<= 0**, rewrite is skipped for that table this cycle (flush and merge still run); lakemon never emits `delete_threshold` 0.0. Files already planned stay in that one step; `max_rewrite_steps` / `byte_budget` have already been applied, and files below `low_min` stay skipped. Otherwise each planned delete-count band is its own `ducklake_rewrite_data_files` `CALL`. `target_file_size` informs the merge target and is not overwritten when already set on the catalog.
+Named parameters override table-scoped work for that invocation. Catalog-wide maintain skips tables with `auto_compact = false`; an explicit table argument still maintains that table. When DuckLake `rewrite_delete_threshold` is set in **(0, 1]** (table → schema → global), lakemon emits **one** rewrite `CALL` with that value (full override of per-rung thresholds and CALL count) and keeps only files whose delete fraction is **>=** that catalog value. If none remain, rewrite is skipped. If the catalog value is **<= 0**, rewrite is skipped for that table this cycle (flush and merge still run); lakemon never emits `delete_threshold` 0.0. `max_rewrite_steps` / `byte_budget` / `min_delete_ratio` have already been applied. Otherwise each planned byte-weighted rung is its own `ducklake_rewrite_data_files` `CALL`. `target_file_size` informs the merge target and is not overwritten when already set on the catalog.
 
 Execution order:
 
 1. Catalog inventory
 2. `ducklake_flush_inlined_data`
-3. `ducklake_rewrite_data_files` once per delete-count band (High → Medium → Low), each with a data-driven `delete_threshold`
+3. `ducklake_rewrite_data_files` once per byte-weighted ladder rung (worst delete-fraction first), each with a data-driven `delete_threshold`
 4. `ducklake_merge_adjacent_files` once per size band that has at least two files
 
 Result columns: `step`, `schema_name`, `table_name`, `action`, `status`, `files_processed`, `files_created`, `details`.
 
-Rewrite emits **one result row per planned band** (`action` is `high` / `medium` / `low`, or `catalog` when DuckLake `rewrite_delete_threshold` is set). `details` always includes `band`, `delete_threshold`, `planned_files`, `planned_bytes`, and `planned_deletes`. `files_processed` is that rung's planned file count. `dry_run => true` sets `status=planned` and appends the generated `CALL`. After execute, `status` is `ok` / `skip` / `error`: `ok` appends `created=` (DuckLake result rows), `error` keeps the planned counts and appends the message, and `auto_compact` skips still list each computed rung.
+Rewrite emits **one result row per planned rung** (`action` is `rung_1` / `rung_2` / …, or `catalog` when DuckLake `rewrite_delete_threshold` is set). `details` always includes `band`, `delete_threshold`, `planned_files`, `planned_bytes`, and `planned_deletes`. `files_processed` is that rung's planned file count. `dry_run => true` sets `status=planned` and appends the generated `CALL`. After execute, `status` is `ok` / `skip` / `error`: `ok` appends `created=` (DuckLake result rows), `error` keeps the planned counts and appends the message, and `auto_compact` skips still list each computed rung.
 
 Failed catalog inventory or a nested DuckLake `CALL` becomes `status = error` (`details` holds the message). Unread per-table metadata is an inventory `error` row (not a silent drop); tables that were read still proceed. The DuckDB session stays usable. A total inventory failure stops the plan.
 
@@ -129,7 +129,7 @@ Same result columns as `lakemon_maintain`. Global steps leave `schema_name` / `t
 
 ### `CALL lakemon_table_stats(catalog [, table])`
 
-One row per table: file counts and bytes, delete counts, **deleted_bytes_weighted**, delete ratio, **rewrite_plan** (each planned band with derived threshold plus file/byte/delete counts), first-step `rewrite_threshold`, `merge_tier_hint`, `target_file_size`, and `auto_compact`. `lakemon_policy()` lists built-in ladder/band defaults; `lakemon_policy(catalog)` lists the effective policy after persisted overrides; stats then apply native DuckLake options. A missing catalog or unloaded `ducklake` raises a DuckDB error (session stays usable). Empty metadata returns no rows. Total unread metadata (no table could be read) also raises; the error includes every diagnostic. Maintain instead emits one inventory `error` row per diagnostic.
+One row per table: file counts and bytes, delete counts, **deleted_bytes_weighted**, delete ratio, **rewrite_plan** (each planned byte-weighted rung with derived threshold plus file/byte/delete counts), first-step `rewrite_threshold`, `merge_tier_hint`, `target_file_size`, and `auto_compact`. `lakemon_policy()` lists built-in ladder/band defaults; `lakemon_policy(catalog)` lists the effective policy after persisted overrides; stats then apply native DuckLake options. A missing catalog or unloaded `ducklake` raises a DuckDB error (session stays usable). Empty metadata returns no rows. Total unread metadata (no table could be read) also raises; the error includes every diagnostic. Maintain instead emits one inventory `error` row per diagnostic.
 
 ### `CALL lakemon_policy([catalog])`
 
@@ -139,9 +139,9 @@ Zero-argument form returns the built-in ladder and merge bands. With a catalog n
 | --- | --- |
 | `kind` | `rewrite_ladder` or `merge_tier` |
 | `name` | `default` (rewrite ladder), or `micro` / `small` / `medium` |
-| `min_value` / `max_value` | rewrite delete-count floors (`high_min` / `low_min`), or merge file-size band |
+| `min_value` / `max_value` | rewrite ladder rung range (`1` / `max_rewrite_steps`), or merge file-size band |
 | `threshold_or_target` | `data-driven` (rewrite) or merge `target_file_size` |
-| `notes` | `medium_min` / `byte_budget` / `max_rewrite_steps`, or `max_compacted_files` |
+| `notes` | `max_rewrite_steps` / `byte_budget` / `min_delete_ratio`, or `max_compacted_files` |
 | `source` | `default` or `override` |
 
 ### `CALL lakemon_set_policy(catalog, kind, name, …)`
@@ -150,9 +150,9 @@ Writes the rewrite ladder or one merge band into `__lakemon.policy` in the **cur
 
 | Named parameter | Type | Applies to |
 | --- | --- | --- |
-| `high_min` / `medium_min` / `low_min` | `BIGINT` | `rewrite_ladder` (strictly descending; `low_min >= 1`) |
-| `byte_budget` | `BIGINT` | `rewrite_ladder` (`0` = unset; per-rung size cap) |
-| `max_rewrite_steps` | `BIGINT` | `rewrite_ladder` (`>= 1`; default `3`) |
+| `max_rewrite_steps` | `BIGINT` | `rewrite_ladder` (ladder size `N`; `1`–`16`; default `3`) |
+| `min_delete_ratio` | `DOUBLE` | `rewrite_ladder` (pool floor in `(0, 1]`; default `0.01`) |
+| `byte_budget` | `BIGINT` | `rewrite_ladder` (`0` = unset; optional per-rung size cap) |
 | `min_file_size` / `max_file_size` | `BIGINT` | `merge_tier` (`min < max`) |
 | `target_file_size` | `VARCHAR` | `merge_tier` |
 | `max_compacted_files` | `BIGINT` | `merge_tier` (`>= 1`) |
@@ -163,23 +163,25 @@ Omitted fields keep the current effective value (previous override or built-in).
 
 Precedence for maintain/stats: **built-in defaults → persisted lakemon policy → native DuckLake options → CALL named parameters** (`lakemon_maintain` for table knobs, `lakemon_maintain_global` for expire/cleanup intervals).
 
-### Rewrite ladder (adaptive delete counts)
+### Rewrite ladder (byte-weighted adaptive)
 
-Files are **not** split into equal-width `delete_threshold` steps (`0.1`, `0.2`, …) or equal-count / equal-byte chunks. Those group a tiny high-ratio file with a large high-churn file — or rank the tiny file first.
+Files are **not** split into equal-width `delete_threshold` steps (`0.1`, `0.2`, …), equal-count chunks, or absolute `delete_count` high/medium/low bands.
 
-Instead, each file is bucketed by **absolute delete count**. High runs first. File size is only a secondary sort and an optional per-rung `byte_budget`. Each rung derives `delete_threshold` as the **minimum delete ratio** of the files in that band so the native `CALL` can reach them. A band whose min ratio is **<= 0** is skipped (no planned or executed rewrite row). A table with files in more than one remaining band emits **one `ducklake_rewrite_data_files` per band** (capped by `max_rewrite_steps`).
+Instead, lakemon considers only files whose delete fraction is **at least `min_delete_ratio`** (default `0.01`). Files below that floor are excluded from the byte pool and from rung membership so a huge near-clean file cannot collapse the ladder. Qualifying files are ordered by delete fraction descending (worst first). The planner walks cumulative `file_size_bytes` and cuts a ladder of `N = max_rewrite_steps` thresholds when the running total crosses `total_bytes * i/N`. Each cut becomes one `ducklake_rewrite_data_files` `CALL` with that data-driven `delete_threshold`. Duplicate cuts (same threshold) merge their file slices. Optional `byte_budget` can trim a rung after the cuts are chosen.
+
+The ladder **never** ends at `0.0`. The last (most inclusive) threshold is the **smallest observed delete fraction among files that meet `min_delete_ratio`**. A table with no qualifying delete data skips rewrite (flush and merge still run). A rung whose threshold would be **<= 0** is skipped.
 
 lakemon **never** uses `delete_threshold` 0.0 — that native threshold matches every file in the table, including ones with no deletes. If you still want a zero threshold, call DuckLake directly: `CALL ducklake_rewrite_data_files('lake', 't', delete_threshold => 0)`.
 
-| Band | Default floor | Order |
+| Knob | Default | Meaning |
 | --- | --- | --- |
-| High | ≥ 10 000 deletes | first `CALL` |
-| Medium | ≥ 1 000 deletes | second `CALL` |
-| Low | ≥ 100 deletes | third `CALL` |
+| `max_rewrite_steps` | `3` (`1`–`16`) | How many byte-weighted cuts to emit |
+| `min_delete_ratio` | `0.01` (`(0, 1]`) | Exclude files below this delete fraction from the ladder |
+| `byte_budget` | unset | Optional per-rung size cap |
 
-Files below `low_min` are skipped. Adaptive rewrite uses `delete_count` from DuckLake metadata. The `ducklake_list_files` fallback does not expose counts (`delete_count` is synthesized as `1`), so those files stay below the default `low_min` unless you lower it.
+Adaptive rewrite uses `delete_count` / `record_count` from DuckLake metadata. The `ducklake_list_files` fallback does not expose counts; it synthesizes a conservative fraction from `delete_file_size_bytes / file_size_bytes` (clamped to `(0, 1]`). Metadata inventory is still required for accurate count-based ladders.
 
-A single near-zero threshold would rewrite every file above that ratio in one `CALL` (time / memory / CPU). Adaptive rungs slice that work: a high-count high-ratio band can run at a tight threshold before a later band uses a lower one.
+A single near-zero threshold would rewrite every dirty file in one `CALL` (time / memory / CPU). Byte-weighted rungs slice that work: an early high-fraction cut rewrites the worst files first; later cuts lower the threshold as more bytes accumulate.
 
 ### Merge size bands
 
@@ -230,7 +232,7 @@ The in-tree shell already loads `lakemon`.
 - `make test` — SQL smoke: `lakemon_version`, `lakemon_policy` / `lakemon_set_policy`, bind errors / maintain error rows when no catalog is attached, `lakemon_maintain_global` registration and retention skip/plan rows
 - CI: `make policy-test` on every push/PR. Full DuckDB **1.5.5** and **2.x** (`v2.0-cyanoptera`) distribution builds run on `main`, `v*` tags, or **Actions → Main Extension Distribution Pipeline → Run workflow** (use that before a community listing submit).
 
-End-to-end rewrite/merge against a live DuckLake catalog is left to your own lake (CI does not attach a lake). Manual check: `ATTACH` a lake, `CALL lakemon_set_policy(...)` for ladder floors / merge bands, `CALL lake.set_option(...)` for the five honored DuckLake keys, then `CALL lakemon_table_stats` / `lakemon_maintain(..., dry_run => true)` and confirm planned rewrite steps (band + derived threshold), merge target, and `auto_compact` skips. Confirm expire/cleanup intervals with `CALL lakemon_maintain_global(..., dry_run => true)`.
+End-to-end rewrite/merge against a live DuckLake catalog is left to your own lake (CI does not attach a lake). Manual check: `ATTACH` a lake, `CALL lakemon_set_policy(...)` for ladder size / merge bands, `CALL lake.set_option(...)` for the five honored DuckLake keys, then `CALL lakemon_table_stats` / `lakemon_maintain(..., dry_run => true)` and confirm planned rewrite steps (rung + byte-derived threshold, never `0.0`), merge target, and `auto_compact` skips. Confirm expire/cleanup intervals with `CALL lakemon_maintain_global(..., dry_run => true)`.
 
 ## Community listing
 

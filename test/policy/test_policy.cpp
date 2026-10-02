@@ -50,77 +50,96 @@ static std::vector<std::vector<FileStat>> EqualCountChunks(std::vector<FileStat>
 	return out;
 }
 
-static void TestDefaultLadderIsStrictlyDescendingCounts() {
+static void TestDefaultLadderIsByteWeighted() {
 	const auto ladder = DefaultRewriteLadder();
 	std::string error;
-	Expect(ValidateDeleteCountLadder(ladder, error), "default ladder validates");
-	Expect(ladder.high_min > ladder.medium_min, "high_min > medium_min");
-	Expect(ladder.medium_min > ladder.low_min, "medium_min > low_min");
-	Expect(ladder.low_min >= 1, "low_min >= 1");
-	Expect(ladder.byte_budget == 0, "byte_budget unset");
+	Expect(ValidateRewriteLadder(ladder, error), "default ladder validates");
 	Expect(ladder.max_rewrite_steps == 3, "default max_rewrite_steps is 3");
+	Expect(ladder.max_rewrite_steps <= kMaxRewriteStepsLimit, "default is within 1–16");
+	Expect(ladder.byte_budget == 0, "byte_budget unset");
+	Expect(std::abs(ladder.min_delete_ratio - 0.01) < 1e-15, "default min_delete_ratio is 0.01");
 }
 
-static void TestValidateRejectsInvertedAndZeroFloors() {
+static void TestValidateRejectsZeroAndOversizeSteps() {
 	std::string error;
-	DeleteCountLadder zero_low = DefaultRewriteLadder();
-	zero_low.low_min = 0;
-	Expect(!ValidateDeleteCountLadder(zero_low, error), "low_min 0 rejected");
-	Expect(error.find("low_min") != std::string::npos, "low_min message");
-
-	error.clear();
-	DeleteCountLadder equal_high = DefaultRewriteLadder();
-	equal_high.high_min = 500;
-	equal_high.medium_min = 500;
-	Expect(!ValidateDeleteCountLadder(equal_high, error), "high_min == medium_min rejected");
-	Expect(error.find("high_min") != std::string::npos, "high_min message");
-
-	error.clear();
-	DeleteCountLadder equal_mid = DefaultRewriteLadder();
-	equal_mid.medium_min = 50;
-	equal_mid.low_min = 50;
-	Expect(!ValidateDeleteCountLadder(equal_mid, error), "medium_min == low_min rejected");
-	Expect(error.find("medium_min") != std::string::npos, "medium_min message");
-
-	error.clear();
-	DeleteCountLadder zero_steps = DefaultRewriteLadder();
+	RewriteLadder zero_steps = DefaultRewriteLadder();
 	zero_steps.max_rewrite_steps = 0;
-	Expect(!ValidateDeleteCountLadder(zero_steps, error), "max_rewrite_steps 0 rejected");
+	Expect(!ValidateRewriteLadder(zero_steps, error), "max_rewrite_steps 0 rejected");
 	Expect(error.find("max_rewrite_steps") != std::string::npos, "max_rewrite_steps message");
+
+	error.clear();
+	RewriteLadder too_many = DefaultRewriteLadder();
+	too_many.max_rewrite_steps = 17;
+	Expect(!ValidateRewriteLadder(too_many, error), "max_rewrite_steps 17 rejected");
+	Expect(error.find("max_rewrite_steps") != std::string::npos, "upper bound message");
+
+	error.clear();
+	RewriteLadder zero_ratio = DefaultRewriteLadder();
+	zero_ratio.min_delete_ratio = 0.0;
+	Expect(!ValidateRewriteLadder(zero_ratio, error), "min_delete_ratio 0 rejected");
+	Expect(error.find("min_delete_ratio") != std::string::npos, "min_delete_ratio message");
+
+	error.clear();
+	RewriteLadder over_ratio = DefaultRewriteLadder();
+	over_ratio.min_delete_ratio = 1.5;
+	Expect(!ValidateRewriteLadder(over_ratio, error), "min_delete_ratio > 1 rejected");
 }
 
-static void TestAssignBandUsesDeleteCountNotRatio() {
-	const auto ladder = DefaultRewriteLadder();
-	DeleteBand band;
-	Expect(AssignDeleteBand(10000, ladder, band) && band == DeleteBand::High, "10000 is high");
-	Expect(AssignDeleteBand(9999, ladder, band) && band == DeleteBand::Medium, "9999 is medium");
-	Expect(AssignDeleteBand(1000, ladder, band) && band == DeleteBand::Medium, "1000 is medium");
-	Expect(AssignDeleteBand(999, ladder, band) && band == DeleteBand::Low, "999 is low");
-	Expect(AssignDeleteBand(100, ladder, band) && band == DeleteBand::Low, "100 is low");
-	Expect(!AssignDeleteBand(99, ladder, band), "99 is below low_min");
-	Expect(!AssignDeleteBand(0, ladder, band), "0 is below low_min");
-	Expect(DeleteBandIndex(DeleteBand::High) == 0 && DeleteBandIndex(DeleteBand::Medium) == 1 &&
-	           DeleteBandIndex(DeleteBand::Low) == 2,
-	       "band index matches groups[] slots");
-	Expect(std::string(DeleteBandName(DeleteBand::High)) == "high", "high name");
-	Expect(std::string(DeleteBandName(DeleteBand::Medium)) == "medium", "medium name");
-	Expect(std::string(DeleteBandName(DeleteBand::Low)) == "low", "low name");
-}
-
-static void TestDeleteCountLadderKeepsHighChurnAheadOfHighRatio() {
+static void TestEqualSizeFilesCutThreeThresholds() {
 	const auto files = std::vector<FileStat>{
-	    MakeFile(1, 50000, 1000000, 800000000), // 5% — 50k deletes
-	    MakeFile(2, 20, 100, 8000),             // 20% — 20 deletes
-	    MakeFile(3, 8000, 10000, 4000000),      // 80% — 8k deletes
+	    MakeFile(1, 90, 100, 100), // 0.90
+	    MakeFile(2, 50, 100, 100), // 0.50
+	    MakeFile(3, 10, 100, 100), // 0.10
 	};
 	const auto rungs = PlanRewriteRungs(files);
-	Expect(rungs.size() == 2, "tiny-ratio is below low_min and must drop");
-	Expect(rungs[0].band == "high", "first rung is high");
-	Expect(rungs[0].files[0].data_file_id == 1, "big-churn is first");
-	Expect(rungs[1].band == "medium", "second rung is medium");
-	Expect(rungs[1].files[0].data_file_id == 3, "medium-hot is in medium");
-	Expect(std::abs(rungs[0].delete_threshold - 0.05) < 1e-12, "high threshold is min ratio 0.05");
-	Expect(std::abs(rungs[1].delete_threshold - 0.8) < 1e-12, "medium threshold is min ratio 0.8");
+	Expect(rungs.size() == 3, "equal-byte files yield three rungs");
+	Expect(rungs[0].band == "rung_1" && rungs[1].band == "rung_2" && rungs[2].band == "rung_3", "rung names");
+	Expect(std::abs(rungs[0].delete_threshold - 0.90) < 1e-12, "first cut is worst fraction");
+	Expect(std::abs(rungs[1].delete_threshold - 0.50) < 1e-12, "second cut is mid fraction");
+	Expect(std::abs(rungs[2].delete_threshold - 0.10) < 1e-12, "last cut is the positive floor");
+	Expect(rungs[0].files[0].data_file_id == 1, "worst file on first rung");
+	Expect(rungs[1].files[0].data_file_id == 2, "mid file on second rung");
+	Expect(rungs[2].files[0].data_file_id == 3, "lowest positive fraction on last rung");
+	for (const auto &step : rungs) {
+		Expect(step.delete_threshold > 0.0, "no planned rung uses delete_threshold 0");
+		Expect(lakemon::ShouldEmitRewriteCall(step.delete_threshold), "maintain would emit this CALL");
+	}
+}
+
+static void TestLadderNeverEndsAtZero() {
+	const auto files = std::vector<FileStat>{
+	    MakeFile(1, 90, 100, 100),
+	    MakeFile(2, 50, 100, 100),
+	    MakeFile(3, 10, 100, 100),
+	    MakeFile(4, 0, 100, 1000), // clean — ignored
+	};
+	const auto rungs = PlanRewriteRungs(files);
+	Expect(!rungs.empty(), "dirty files still plan");
+	Expect(std::abs(rungs.back().delete_threshold - 0.10) < 1e-12, "floor is the smallest positive fraction");
+	for (const auto &step : rungs) {
+		Expect(step.delete_threshold > 0.0, "ladder never emits 0.0");
+	}
+}
+
+static void TestNoDeleteDataSkipsRewrite() {
+	Expect(PlanRewriteRungs({}).empty(), "empty input");
+	const auto clean = std::vector<FileStat>{MakeFile(1, 0, 1000, 10), MakeFile(2, 0, 1000, 10)};
+	Expect(PlanRewriteRungs(clean).empty(), "no delete data yields no rungs");
+}
+
+static void TestHugeLowRatioFileDoesNotHideSmallHotFile() {
+	// Bytes are dominated by a low-ratio file; early cuts still fire on the
+	// worst files first, and the last cut is the observed floor (0.05).
+	const auto files = std::vector<FileStat>{
+	    MakeFile(1, 50000, 1000000, 800000000), // 0.05 — most bytes
+	    MakeFile(2, 20, 100, 8000),             // 0.20
+	    MakeFile(3, 8000, 10000, 4000000),      // 0.80
+	};
+	const auto rungs = PlanRewriteRungs(files);
+	Expect(!rungs.empty(), "dirty files plan");
+	Expect(rungs[0].files[0].data_file_id == 3, "worst fraction runs first");
+	Expect(std::abs(rungs.back().delete_threshold - 0.05) < 1e-12, "last cut is the 0.05 floor");
+	Expect(rungs.back().delete_threshold > 0.0, "floor is not 0.0");
 }
 
 static void TestEqualWidthRatioStepsMisgroupTheSameFiles() {
@@ -137,9 +156,9 @@ static void TestEqualWidthRatioStepsMisgroupTheSameFiles() {
 	Expect(tiny_idx > big_idx, "equal-width ratio buckets rank the 20-delete file above the 50k-delete file");
 
 	const auto rungs = PlanRewriteRungs({big, tiny, hot});
-	Expect(rungs.size() == 2, "two planned rungs");
-	Expect(rungs[0].files[0].data_file_id == 1 && rungs[1].files[0].data_file_id == 3, "count ladder keeps big then hot");
-	Expect(rungs[0].files.size() == 1 && rungs[1].files.size() == 1, "tiny-ratio is not planned");
+	Expect(!rungs.empty(), "byte-weighted plan is non-empty");
+	Expect(rungs[0].files[0].data_file_id == 3, "worst fraction is first, not the equal-width bucket");
+	Expect(std::abs(rungs.back().delete_threshold - 0.05) < 1e-12, "floor is min positive fraction");
 }
 
 static void TestEqualCountSizeSplitsMixCleanAndDirtyFiles() {
@@ -172,135 +191,165 @@ static void TestEqualCountSizeSplitsMixCleanAndDirtyFiles() {
 	Expect(mixed, "equal-count size splits mix 0-delete files with high-delete files");
 
 	const auto rungs = PlanRewriteRungs(files);
-	Expect(rungs.size() == 1, "only high band");
-	Expect(rungs[0].band == "high", "high band");
-	Expect(rungs[0].files.size() == 2, "two dirty files");
-	Expect(rungs[0].files[0].data_file_id == 4 && rungs[0].files[1].data_file_id == 2, "dirty-b then dirty-a");
-	Expect(rungs[0].planned_deletes == 27000, "planned deletes sum");
+	Expect(!rungs.empty(), "dirty files plan");
+	uint64_t planned = 0;
+	for (const auto &step : rungs) {
+		planned += step.files.size();
+		for (const auto &file : step.files) {
+			Expect(file.delete_count > 0, "clean files are never planned");
+		}
+	}
+	Expect(planned == 2, "only the two dirty files are planned");
 }
 
-static void TestByteBudgetIsSecondaryNotABucketKey() {
-	DeleteCountLadder ladder = DefaultRewriteLadder();
-	ladder.byte_budget = 250;
+static void TestByteBudgetCapsARung() {
+	RewriteLadder ladder = DefaultRewriteLadder();
+	ladder.byte_budget = 160;
+	ladder.max_rewrite_steps = 1;
 	const auto files = std::vector<FileStat>{
-	    MakeFile(1, 20000, 40000, 200),
-	    MakeFile(2, 18000, 40000, 80),
-	    MakeFile(3, 15000, 40000, 40),
-	    MakeFile(4, 2000, 5000, 10),
+	    MakeFile(1, 90, 100, 80),
+	    MakeFile(2, 80, 100, 80),
+	    MakeFile(3, 70, 100, 80),
 	};
 	const auto rungs = PlanRewriteRungs(files, ladder);
-	Expect(rungs[0].band == "high", "first band is still high");
-	Expect(rungs[0].files.size() == 2, "budget keeps two high files");
-	Expect(rungs[0].files[0].data_file_id == 1 && rungs[0].files[1].data_file_id == 3,
-	       "200+80 exceeds 250 so h2 is skipped and h3 fills");
-	Expect(rungs[0].planned_bytes == 240, "planned bytes after budget");
-	Expect(rungs[1].band == "medium" && rungs[1].files[0].data_file_id == 4, "medium file is its own rung");
+	Expect(rungs.size() == 1, "N=1 is one rung");
+	Expect(rungs[0].files.size() == 2, "budget keeps two files (80+80=160; third would be 240)");
+	Expect(rungs[0].files[0].data_file_id == 1 && rungs[0].files[1].data_file_id == 2, "worst-first under budget");
+	Expect(rungs[0].planned_bytes == 160, "planned bytes after budget");
+	Expect(rungs[0].delete_threshold > 0.0, "budgeted rung stays positive");
 }
 
 static void TestFirstFileMayExceedBudgetToMakeProgress() {
-	DeleteCountLadder ladder = DefaultRewriteLadder();
+	RewriteLadder ladder = DefaultRewriteLadder();
 	ladder.byte_budget = 50;
+	ladder.max_rewrite_steps = 1;
 	const auto files = std::vector<FileStat>{
-	    MakeFile(1, 20000, 40000, 500),
-	    MakeFile(2, 19000, 40000, 10),
+	    MakeFile(1, 90, 100, 500),
+	    MakeFile(2, 80, 100, 10),
 	};
 	const auto rungs = PlanRewriteRungs(files, ladder);
 	Expect(rungs[0].files.size() == 1, "only the first file");
 	Expect(rungs[0].files[0].data_file_id == 1, "huge file still planned");
 }
 
-static void TestEmptyInputAndAllCleanFilesYieldNoRungs() {
-	Expect(PlanRewriteRungs({}).empty(), "empty input");
-	const auto clean = std::vector<FileStat>{MakeFile(1, 0, 1000, 10), MakeFile(2, 50, 1000, 10)};
-	Expect(PlanRewriteRungs(clean).empty(), "below low_min yields no rungs");
-}
-
 static void TestZeroRecordFileWithDeletesHasRatioOne() {
 	Expect(DeleteRatio(MakeFile(1, 5, 0, 1)) == 1.0, "ghost file ratio 1");
 	Expect(DeleteRatio(MakeFile(2, 0, 0, 1)) == 0.0, "empty file ratio 0");
+	FileStat listed;
+	listed.delete_file_size_bytes = 16;
+	listed.record_count = 0;
+	listed.delete_count = 0;
+	listed.file_size_bytes = 80;
+	Expect(std::abs(DeleteRatio(listed) - 0.2) < 1e-12, "list_files uses size ratio, not 1.0");
+	Expect(HasPositiveDeleteFraction(listed), "list_files delete file is dirty");
+}
+
+static void TestMinDeleteRatioExcludesGiantNearClean() {
+	const auto files = std::vector<FileStat>{
+	    MakeFile(1, 1, 1000000, 800000000), // ~1e-6 — huge near-clean
+	    MakeFile(2, 90, 100, 100),
+	    MakeFile(3, 50, 100, 100),
+	    MakeFile(4, 10, 100, 100),
+	};
+	const auto rungs = PlanRewriteRungs(files);
+	Expect(rungs.size() == 3, "giant below min_delete_ratio does not collapse the ladder");
+	Expect(std::abs(rungs[0].delete_threshold - 0.90) < 1e-12, "first cut stays 0.90");
+	Expect(std::abs(rungs.back().delete_threshold - 0.10) < 1e-12, "floor is 0.10 not 1e-6");
+	for (const auto &step : rungs) {
+		for (const auto &file : step.files) {
+			Expect(file.data_file_id != 1, "giant near-clean file is excluded");
+			Expect(DeleteRatio(file) >= kDefaultMinDeleteRatio, "rung files meet min_delete_ratio");
+		}
+		Expect(step.delete_threshold > 0.0, "planned threshold stays positive");
+	}
+
+	RewriteLadder open = DefaultRewriteLadder();
+	open.min_delete_ratio = 1e-9;
+	const auto unfiltered = PlanRewriteRungs(files, open);
+	Expect(!unfiltered.empty(), "tiny floor still plans");
+	Expect(std::abs(unfiltered.back().delete_threshold - 1e-6) < 1e-12,
+	       "without a 0.01 floor the giant would set the last cut");
 }
 
 static void TestInvalidLadderFailsClosed() {
-	DeleteCountLadder bad;
-	bad.high_min = 1;
-	bad.medium_min = 1;
-	bad.low_min = 1;
-	bad.max_rewrite_steps = 3;
+	RewriteLadder bad;
+	bad.max_rewrite_steps = 0;
 	std::string error;
 	Expect(PlanRewriteRungs({}, bad, &error).empty(), "invalid ladder returns no rungs");
 	Expect(!error.empty(), "invalid ladder records an error");
 }
 
-static void TestMaxRewriteStepsCap() {
-	DeleteCountLadder ladder = DefaultRewriteLadder();
-	ladder.max_rewrite_steps = 1;
+static void TestMaxRewriteStepsIsLadderSize() {
 	const auto files = std::vector<FileStat>{
-	    MakeFile(1, 20000, 40000, 100),
-	    MakeFile(2, 2000, 4000, 100),
-	    MakeFile(3, 200, 400, 100),
+	    MakeFile(1, 90, 100, 100),
+	    MakeFile(2, 50, 100, 100),
+	    MakeFile(3, 10, 100, 100),
 	};
-	const auto rungs = PlanRewriteRungs(files, ladder);
-	Expect(rungs.size() == 1, "cap keeps only the first (high) rung");
-	Expect(rungs[0].band == "high", "high runs first under the cap");
+	RewriteLadder one = DefaultRewriteLadder();
+	one.max_rewrite_steps = 1;
+	const auto single = PlanRewriteRungs(files, one);
+	Expect(single.size() == 1, "N=1 emits one CALL");
+	Expect(std::abs(single[0].delete_threshold - 0.10) < 1e-12, "single cut is the floor (all bytes)");
 
-	ladder.max_rewrite_steps = 2;
-	const auto two = PlanRewriteRungs(files, ladder);
-	Expect(two.size() == 2, "cap 2 keeps high and medium");
-	Expect(two[0].band == "high" && two[1].band == "medium", "low is dropped by the cap");
+	RewriteLadder two = DefaultRewriteLadder();
+	two.max_rewrite_steps = 2;
+	const auto pair = PlanRewriteRungs(files, two);
+	Expect(pair.size() == 2, "N=2 emits two cuts");
+	Expect(pair[0].delete_threshold > pair[1].delete_threshold, "worst-first then floor");
+	Expect(std::abs(pair[1].delete_threshold - 0.10) < 1e-12, "last cut is the positive floor");
 }
 
-static void TestZeroRatioBandIsSkipped() {
+static void TestZeroRatioSliceIsSkipped() {
 	FileStat zero = MakeFile(1, 0, 1000, 100);
 	PlannedRewriteStep out;
-	Expect(!FinishRewriteRung(DeleteBand::High, {zero}, 0, out), "min ratio 0 skips the band");
+	Expect(!FinishRewriteRung("rung_1", {zero}, 0, 0.0, 0.1, 0.01, out), "min ratio 0 skips the rung");
 	Expect(!lakemon::ShouldEmitRewriteCall(0.0), "threshold 0 is never a lakemon rewrite CALL");
 	Expect(!lakemon::ShouldEmitRewriteCall(-0.1), "negative threshold is never a lakemon rewrite CALL");
 	Expect(lakemon::ShouldEmitRewriteCall(0.05), "positive threshold may emit");
 }
 
-static void TestZeroRatioFileDoesNotPoisonPositiveBand() {
+static void TestZeroRatioFileDoesNotPoisonPositiveRung() {
 	FileStat dirty = MakeFile(1, 20000, 40000, 100);
 	FileStat zero = MakeFile(2, 0, 1000, 50);
 	PlannedRewriteStep out;
-	Expect(FinishRewriteRung(DeleteBand::High, {dirty, zero}, 0, out), "positive files remain");
+	Expect(FinishRewriteRung("rung_1", {dirty, zero}, 0, 0.5, 0.5, 0.01, out), "positive files remain");
 	Expect(out.files.size() == 1 && out.files[0].data_file_id == 1, "zero-ratio file is dropped");
 	Expect(out.delete_threshold > 0.0, "threshold stays positive");
 	Expect(lakemon::ShouldEmitRewriteCall(out.delete_threshold), "remaining rung is emittable");
 }
 
-static void TestPlannedRungsNeverUseZeroThreshold() {
-	const auto files = std::vector<FileStat>{
-	    MakeFile(1, 50000, 1000000, 800000000),
-	    MakeFile(2, 20, 100, 8000),
-	    MakeFile(3, 8000, 10000, 4000000),
-	    MakeFile(4, 0, 10000, 100),
-	};
-	const auto rungs = PlanRewriteRungs(files);
-	Expect(!rungs.empty(), "dirty files still plan");
-	for (const auto &step : rungs) {
-		Expect(step.delete_threshold > 0.0, "no planned rung uses delete_threshold 0");
-		Expect(lakemon::ShouldEmitRewriteCall(step.delete_threshold), "maintain would emit this CALL");
+static void TestDuplicateThresholdMergesFiles() {
+	PlannedRewriteStep first;
+	Expect(FinishRewriteRung("rung_1", {MakeFile(1, 50, 100, 40)}, 0, 0.5, 0.5, 0.01, first), "first slice");
+	PlannedRewriteStep second;
+	Expect(FinishRewriteRung("rung_1", {MakeFile(2, 50, 100, 60), MakeFile(1, 50, 100, 40)}, 0, 0.5, 0.5, 0.01, second),
+	       "second slice shares a file id");
+	Expect(SameThreshold(first.delete_threshold, second.delete_threshold), "same data-driven threshold");
+	MergeRewriteRung(first, std::move(second));
+	Expect(first.files.size() == 2, "duplicate threshold merges slices instead of dropping");
+	Expect(first.planned_bytes == 100, "planned bytes refreshed");
+	Expect(first.planned_deletes == 100, "planned deletes refreshed");
+	bool saw1 = false;
+	bool saw2 = false;
+	for (const auto &file : first.files) {
+		saw1 = saw1 || file.data_file_id == 1;
+		saw2 = saw2 || file.data_file_id == 2;
 	}
+	Expect(saw1 && saw2, "dedupe keeps both file ids");
 }
 
-static void TestSkipBelowLowMin() {
-	const auto files = std::vector<FileStat>{
-	    MakeFile(1, 99, 100, 10),
-	    MakeFile(2, 50, 50, 10),
-	};
-	Expect(PlanRewriteRungs(files).empty(), "files below low_min are skipped");
-}
-
-static void TestMinRatioThresholdPerRung() {
-	const auto files = std::vector<FileStat>{
-	    MakeFile(1, 20000, 40000, 100), // 0.50 high
-	    MakeFile(2, 15000, 100000, 100), // 0.15 high
-	    MakeFile(3, 2000, 2500, 100),   // 0.80 medium
-	};
-	const auto rungs = PlanRewriteRungs(files);
-	Expect(rungs.size() == 2, "high and medium");
-	Expect(std::abs(rungs[0].delete_threshold - 0.15) < 1e-12, "high threshold is the min ratio in the band");
-	Expect(std::abs(rungs[1].delete_threshold - 0.80) < 1e-12, "medium threshold is that band's min ratio");
+static void TestListFilesSizeRatioCanBeExcluded() {
+	FileStat listed;
+	listed.data_file_id = 9;
+	listed.file_size_bytes = 1000000;
+	listed.delete_file_size_bytes = 100; // 1e-4
+	listed.record_count = 0;
+	listed.delete_count = 0;
+	Expect(std::abs(DeleteRatio(listed) - 1e-4) < 1e-12, "conservative size ratio");
+	Expect(!QualifiesForRewrite(listed, kDefaultMinDeleteRatio), "below default min_delete_ratio");
+	const auto rungs = PlanRewriteRungs({listed, MakeFile(1, 50, 100, 100)});
+	Expect(rungs.size() == 1, "real dirty file still plans");
+	Expect(rungs[0].files.size() == 1 && rungs[0].files[0].data_file_id == 1, "list_files near-clean is excluded");
 }
 
 static void TestDeletedBytesUsesCount() {
@@ -312,48 +361,64 @@ static void TestDeletedBytesUsesCount() {
 	Expect(std::abs(DeleteRatio(heavy) - 0.20) < 1e-9, "ratio 0.20");
 }
 
-static void TestMultiBandPlanEmitsDistinctCalls() {
+static void TestMultiRungPlanEmitsDistinctCalls() {
 	std::vector<FileStat> files;
-	files.push_back(MakeFile("main", "events", 1, 50000, 1000000, 800000000));
-	files.push_back(MakeFile("main", "events", 2, 20, 100, 8000));
-	files.push_back(MakeFile("main", "events", 3, 8000, 10000, 4000000));
+	files.push_back(MakeFile("main", "events", 1, 90, 100, 100));
+	files.push_back(MakeFile("main", "events", 2, 50, 100, 100));
+	files.push_back(MakeFile("main", "events", 3, 10, 100, 100));
 	const auto hint = SummarizeTable(files);
-	Expect(hint.rewrite_steps.size() == 2, "dry-run plan has two rewrite steps");
-	Expect(hint.rewrite_steps[0].band == "high" && hint.rewrite_steps[1].band == "medium", "High then Medium");
+	Expect(hint.rewrite_steps.size() == 3, "dry-run plan has three rewrite steps");
+	Expect(hint.rewrite_steps[0].band == "rung_1" && hint.rewrite_steps[2].band == "rung_3", "rung_1 then later rungs");
 	Expect(hint.rewrite_steps[0].delete_threshold != hint.rewrite_steps[1].delete_threshold,
 	       "thresholds are data-driven and distinct");
-	Expect(hint.rewrite_plan.find("band=high") != std::string::npos, "plan surfaces high band");
-	Expect(hint.rewrite_plan.find("band=medium") != std::string::npos, "plan surfaces medium band");
+	Expect(hint.rewrite_plan.find("band=rung_1") != std::string::npos, "plan surfaces first rung");
+	Expect(hint.rewrite_plan.find("band=rung_2") != std::string::npos, "plan surfaces second rung");
 	Expect(hint.rewrite_plan.find("planned_files=") != std::string::npos, "plan surfaces file counts");
+	Expect(hint.rewrite_plan.find("delete_threshold=0") == std::string::npos ||
+	           hint.rewrite_plan.find("delete_threshold=0.1") != std::string::npos,
+	       "plan may show 0.1 but not a lone 0.0 cut");
+	for (const auto &step : hint.rewrite_steps) {
+		Expect(step.delete_threshold > 0.0, "summarize never plans 0.0");
+	}
 
 	lakemon::TableRef ref;
 	ref.schema = "main";
 	ref.table = "events";
-	const std::string high_sql = lakemon::RewriteDataFilesCall("lake", ref, hint.rewrite_steps[0].delete_threshold);
-	const std::string medium_sql = lakemon::RewriteDataFilesCall("lake", ref, hint.rewrite_steps[1].delete_threshold);
-	Expect(high_sql != medium_sql, "each rung is its own CALL");
-	Expect(high_sql.find("delete_threshold => 0.05") != std::string::npos, "high CALL uses derived 0.05");
-	Expect(medium_sql.find("delete_threshold => 0.8") != std::string::npos, "medium CALL uses derived 0.8");
+	const std::string first_sql = lakemon::RewriteDataFilesCall("lake", ref, hint.rewrite_steps[0].delete_threshold);
+	const std::string last_sql = lakemon::RewriteDataFilesCall("lake", ref, hint.rewrite_steps[2].delete_threshold);
+	Expect(first_sql != last_sql, "each rung is its own CALL");
+	Expect(first_sql.find("delete_threshold => 0.9") != std::string::npos, "first CALL uses derived 0.9");
+	Expect(last_sql.find("delete_threshold => 0.1") != std::string::npos, "last CALL uses the positive floor");
 
 	const auto preview = PreviewRewriteRows(hint.rewrite_steps);
-	Expect(preview.size() == 2, "maintain emits one result row per rung, not one opaque rewrite");
-	Expect(preview[0].action == "high" && preview[1].action == "medium", "action is the computed band");
-	Expect(preview[0].files_processed == 1 && preview[1].files_processed == 1, "files_processed is planned files");
-	Expect(preview[0].details.find("delete_threshold=0.05") != std::string::npos, "high row shows data-driven threshold");
-	Expect(preview[0].details.find("planned_files=1") != std::string::npos, "high row shows planned_files");
-	Expect(preview[0].details.find("planned_bytes=800000000") != std::string::npos, "high row shows planned_bytes");
-	Expect(preview[0].details.find("planned_deletes=50000") != std::string::npos, "high row shows planned_deletes");
-	Expect(preview[1].details.find("delete_threshold=0.8") != std::string::npos, "medium row shows data-driven threshold");
-	Expect(preview[1].details.find("planned_deletes=8000") != std::string::npos, "medium row shows planned_deletes");
-	Expect(preview[0].details.find("band=high") != std::string::npos && preview[1].details.find("band=medium") != std::string::npos,
-	       "each row names its band");
+	Expect(preview.size() == 3, "maintain emits one result row per rung, not one opaque rewrite");
+	Expect(preview[0].action == "rung_1" && preview[2].action == "rung_3", "action is the computed rung");
+	Expect(preview[0].files_processed == 1 && preview[2].files_processed == 1, "files_processed is planned files");
+	Expect(preview[0].details.find("delete_threshold=0.9") != std::string::npos, "first row shows data-driven threshold");
+	Expect(preview[0].details.find("planned_files=1") != std::string::npos, "first row shows planned_files");
+	Expect(preview[2].details.find("delete_threshold=0.1") != std::string::npos, "last row shows the floor");
+	Expect(preview[0].details.find("band=rung_1") != std::string::npos, "each row names its rung");
 
-	const std::string skip_high = preview[0].details + " | auto_compact=false";
-	Expect(skip_high.find("band=high") != std::string::npos && skip_high.find("planned_deletes=50000") != std::string::npos,
-	       "skip/error rows keep the planned rung, not an opaque rewrite");
-	const std::string ok_high = preview[0].details + " | created=1";
-	Expect(ok_high.find("delete_threshold=0.05") != std::string::npos && ok_high.find("created=1") != std::string::npos,
+	const std::string skip_first = preview[0].details + " | auto_compact=false";
+	Expect(skip_first.find("band=rung_1") != std::string::npos, "skip/error rows keep the planned rung");
+	const std::string ok_first = preview[0].details + " | created=1";
+	Expect(ok_first.find("delete_threshold=0.9") != std::string::npos && ok_first.find("created=1") != std::string::npos,
 	       "execute ok keeps the plan and records how the CALL affected the table");
+}
+
+static void TestCutsUseBytesNotDeleteCount() {
+	// Same delete counts, very different sizes: cuts follow bytes.
+	const auto files = std::vector<FileStat>{
+	    MakeFile(1, 100, 200, 10),   // 0.50, tiny
+	    MakeFile(2, 100, 1000, 100), // 0.10, most bytes
+	    MakeFile(3, 100, 125, 90),   // 0.80, mid bytes
+	};
+	RewriteLadder ladder = DefaultRewriteLadder();
+	ladder.max_rewrite_steps = 2;
+	const auto rungs = PlanRewriteRungs(files, ladder);
+	Expect(rungs.size() == 2, "two byte-weighted cuts");
+	Expect(rungs[0].files[0].data_file_id == 3, "worst fraction first regardless of delete_count");
+	Expect(std::abs(rungs.back().delete_threshold - 0.10) < 1e-12, "floor is 0.10, not a delete_count band");
 }
 
 static void TestMergeTiers() {
@@ -439,25 +504,27 @@ static void TestFormatInventoryDiagnosticsJoinsAll() {
 }
 
 int main() {
-	TestDefaultLadderIsStrictlyDescendingCounts();
-	TestValidateRejectsInvertedAndZeroFloors();
-	TestAssignBandUsesDeleteCountNotRatio();
-	TestDeleteCountLadderKeepsHighChurnAheadOfHighRatio();
+	TestDefaultLadderIsByteWeighted();
+	TestValidateRejectsZeroAndOversizeSteps();
+	TestEqualSizeFilesCutThreeThresholds();
+	TestLadderNeverEndsAtZero();
+	TestNoDeleteDataSkipsRewrite();
+	TestHugeLowRatioFileDoesNotHideSmallHotFile();
 	TestEqualWidthRatioStepsMisgroupTheSameFiles();
 	TestEqualCountSizeSplitsMixCleanAndDirtyFiles();
-	TestByteBudgetIsSecondaryNotABucketKey();
+	TestByteBudgetCapsARung();
 	TestFirstFileMayExceedBudgetToMakeProgress();
-	TestEmptyInputAndAllCleanFilesYieldNoRungs();
 	TestZeroRecordFileWithDeletesHasRatioOne();
+	TestMinDeleteRatioExcludesGiantNearClean();
 	TestInvalidLadderFailsClosed();
-	TestMaxRewriteStepsCap();
-	TestZeroRatioBandIsSkipped();
-	TestZeroRatioFileDoesNotPoisonPositiveBand();
-	TestPlannedRungsNeverUseZeroThreshold();
-	TestSkipBelowLowMin();
-	TestMinRatioThresholdPerRung();
+	TestMaxRewriteStepsIsLadderSize();
+	TestZeroRatioSliceIsSkipped();
+	TestZeroRatioFileDoesNotPoisonPositiveRung();
+	TestDuplicateThresholdMergesFiles();
+	TestListFilesSizeRatioCanBeExcluded();
 	TestDeletedBytesUsesCount();
-	TestMultiBandPlanEmitsDistinctCalls();
+	TestMultiRungPlanEmitsDistinctCalls();
+	TestCutsUseBytesNotDeleteCount();
 	TestMergeTiers();
 	TestTableHintMerge();
 	TestOneFileDoesNotHintMerge();

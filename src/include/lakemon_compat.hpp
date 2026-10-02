@@ -103,6 +103,24 @@ inline std::string CellString(QueryHandle &result, duckdb::idx_t col, duckdb::id
 	return value.ToString();
 }
 
+inline double CellDouble(QueryHandle &result, duckdb::idx_t col, duckdb::idx_t row, double fallback = 0) {
+	const duckdb::Value value = CellAt(result, col, row);
+	if (value.IsNull()) {
+		return fallback;
+	}
+	try {
+		return value.GetValue<double>();
+	} catch (const duckdb::InterruptException &) {
+		throw;
+	} catch (const std::bad_alloc &) {
+		throw;
+	} catch (const duckdb::Exception &) {
+		return fallback;
+	} catch (const std::exception &) {
+		return fallback;
+	}
+}
+
 inline int64_t CellInt64(QueryHandle &result, duckdb::idx_t col, duckdb::idx_t row, int64_t fallback = 0) {
 	const duckdb::Value value = CellAt(result, col, row);
 	if (value.IsNull()) {

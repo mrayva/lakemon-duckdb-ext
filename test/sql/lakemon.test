@@ -44,7 +44,12 @@ small
 query II
 SELECT min_value, threshold_or_target FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
 ----
-10000	data-driven
+1	data-driven
+
+query I
+SELECT max_value FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
+----
+3
 
 query I
 SELECT threshold_or_target FROM lakemon_policy() WHERE kind = 'merge_tier' AND name = 'micro';
@@ -58,25 +63,25 @@ default
 
 # Persist does not require an attached DuckLake catalog.
 query II
-SELECT status, details FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', high_min => 20000);
+SELECT status, details FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', max_rewrite_steps => 4);
 ----
-ok	medium_min=1000; low_min=100; byte_budget=none; max_rewrite_steps=3
+ok	max_rewrite_steps=4; byte_budget=none; min_delete_ratio=0.01
 
 query II
-SELECT min_value, source FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
+SELECT max_value, source FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
 ----
-20000	override
+4	override
 
 # Zero-arg form stays on built-in defaults.
 query II
-SELECT min_value, source FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
+SELECT max_value, source FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
 ----
-10000	default
+3	default
 
 query I
 SELECT notes FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
 ----
-medium_min=1000; low_min=100; byte_budget=none; max_rewrite_steps=3
+max_rewrite_steps=4; byte_budget=none; min_delete_ratio=0.01
 
 query II
 SELECT status, details FROM lakemon_set_policy('lake', 'merge_tier', 'micro', target_file_size => '8MB', max_compacted_files => 128);
@@ -99,7 +104,7 @@ SELECT source FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
 default
 
 query I
-SELECT status FROM lakemon_set_policy('other', 'rewrite_ladder', 'default', low_min => 50);
+SELECT status FROM lakemon_set_policy('other', 'rewrite_ladder', 'default', max_rewrite_steps => 8);
 ----
 ok
 
@@ -115,12 +120,17 @@ SELECT status FROM lakemon_set_policy('other', reset_all => true);
 ok
 
 query I
-SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'hot', high_min => 20000);
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'hot', max_rewrite_steps => 2);
 ----
 error
 
 query I
-SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', high_min => 500);
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', max_rewrite_steps => 0);
+----
+error
+
+query I
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', min_delete_ratio => 0);
 ----
 error
 
