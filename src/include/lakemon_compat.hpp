@@ -27,11 +27,18 @@
 #if DUCKDB_MAJOR_VERSION >= 2
 #define LAKEMON_DUCKDB_2 1
 #include "duckdb/common/identifier.hpp"
+#include "duckdb/function/function.hpp"
+#include "duckdb/function/table_function.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/main/result_format.hpp"
 #else
 #define LAKEMON_DUCKDB_2 0
+#include "duckdb/function/table_function.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #endif
+
+#include <initializer_list>
+#include <utility>
 
 namespace lakemon {
 
@@ -83,7 +90,12 @@ inline duckdb::Value CellAt(QueryHandle &result, duckdb::idx_t col, duckdb::idx_
 		return duckdb::Value();
 	}
 	try {
+#if LAKEMON_DUCKDB_2
+		// QueryResult has no GetValue; Collection() Completes into a chunk CDC.
+		return result.Collection<duckdb::ChunkFormat>().GetValue(col, row);
+#else
 		return result.GetValue(col, row);
+#endif
 	} catch (const duckdb::InterruptException &) {
 		throw;
 	} catch (const std::bad_alloc &) {
@@ -161,6 +173,23 @@ inline void FinishChunk(duckdb::DataChunk &output, duckdb::idx_t count) {
 	output.SetChildCardinality(count);
 #else
 	output.SetCardinality(count);
+#endif
+}
+
+// 1.5: TableFunction::named_parameters. 2.x: typed **kwargs on the signature.
+inline void AddNamedParameters(
+    duckdb::TableFunction &function,
+    std::initializer_list<std::pair<const char *, duckdb::LogicalType>> params) {
+#if LAKEMON_DUCKDB_2
+	duckdb::TypedKwargs options;
+	for (const auto &param : params) {
+		options.Add(param.first, param.second);
+	}
+	function.GetSignature().AddTypedKwargs("options", std::move(options));
+#else
+	for (const auto &param : params) {
+		function.named_parameters[param.first] = param.second;
+	}
 #endif
 }
 

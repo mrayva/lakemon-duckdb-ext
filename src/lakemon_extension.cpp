@@ -389,7 +389,7 @@ static void ParseNamedSetPolicy(TableFunctionBindInput &input, SetPolicyBindData
 			data.patch.set_max_compacted_files =
 			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.max_compacted_files, "max_compacted_files");
 		} else {
-			throw InvalidInputException("lakemon: unknown set_policy parameter '%s'", entry.first);
+			throw InvalidInputException("lakemon: unknown set_policy parameter '%s'", entry.first.c_str());
 		}
 	}
 }
@@ -489,28 +489,34 @@ static void VersionFun(DataChunk &, ExpressionState &, Vector &result) {
 }
 
 static void AddNamedMaintainParams(TableFunction &function) {
-	function.named_parameters["dry_run"] = LogicalType::BOOLEAN;
-	function.named_parameters["max_compacted_files"] = LogicalType::BIGINT;
+	lakemon::AddNamedParameters(function, {
+	    {"dry_run", LogicalType::BOOLEAN},
+	    {"max_compacted_files", LogicalType::BIGINT},
+	});
 }
 
 static void AddNamedGlobalMaintainParams(TableFunction &function) {
-	function.named_parameters["dry_run"] = LogicalType::BOOLEAN;
-	function.named_parameters["skip_expire"] = LogicalType::BOOLEAN;
-	function.named_parameters["skip_cleanup"] = LogicalType::BOOLEAN;
-	function.named_parameters["expire_older_than"] = LogicalType::VARCHAR;
-	function.named_parameters["delete_older_than"] = LogicalType::VARCHAR;
+	lakemon::AddNamedParameters(function, {
+	    {"dry_run", LogicalType::BOOLEAN},
+	    {"skip_expire", LogicalType::BOOLEAN},
+	    {"skip_cleanup", LogicalType::BOOLEAN},
+	    {"expire_older_than", LogicalType::VARCHAR},
+	    {"delete_older_than", LogicalType::VARCHAR},
+	});
 }
 
 static void AddNamedSetPolicyParams(TableFunction &function) {
-	function.named_parameters["reset"] = LogicalType::BOOLEAN;
-	function.named_parameters["reset_all"] = LogicalType::BOOLEAN;
-	function.named_parameters["byte_budget"] = LogicalType::BIGINT;
-	function.named_parameters["max_rewrite_steps"] = LogicalType::BIGINT;
-	function.named_parameters["min_delete_ratio"] = LogicalType::DOUBLE;
-	function.named_parameters["min_file_size"] = LogicalType::BIGINT;
-	function.named_parameters["max_file_size"] = LogicalType::BIGINT;
-	function.named_parameters["target_file_size"] = LogicalType::VARCHAR;
-	function.named_parameters["max_compacted_files"] = LogicalType::BIGINT;
+	lakemon::AddNamedParameters(function, {
+	    {"reset", LogicalType::BOOLEAN},
+	    {"reset_all", LogicalType::BOOLEAN},
+	    {"byte_budget", LogicalType::BIGINT},
+	    {"max_rewrite_steps", LogicalType::BIGINT},
+	    {"min_delete_ratio", LogicalType::DOUBLE},
+	    {"min_file_size", LogicalType::BIGINT},
+	    {"max_file_size", LogicalType::BIGINT},
+	    {"target_file_size", LogicalType::VARCHAR},
+	    {"max_compacted_files", LogicalType::BIGINT},
+	});
 }
 
 } // namespace

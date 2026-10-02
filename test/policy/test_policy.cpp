@@ -484,6 +484,23 @@ static void TestGlobalExpireCleanupSkipSemantics() {
 	Expect(lakemon::ShouldRunCleanup(false), "cleanup runs unless skipped");
 }
 
+static void TestCumulativeCrossesCutIsOverflowSafe() {
+	Expect(!CumulativeCrossesCut(0, 10, 1, 3), "zero cumulative does not cross");
+	Expect(!CumulativeCrossesCut(5, 0, 1, 3), "zero total does not cross");
+	Expect(!CumulativeCrossesCut(5, 10, 0, 3), "zero cut index does not cross");
+	Expect(!CumulativeCrossesCut(5, 10, 1, 0), "zero ladder size does not cross");
+	Expect(CumulativeCrossesCut(5, 10, 1, 2), "half the bytes crosses 1/2");
+	Expect(!CumulativeCrossesCut(4, 10, 1, 2), "below half does not cross 1/2");
+	Expect(CumulativeCrossesCut(10, 10, 3, 3), "full bytes crosses the last cut");
+
+	// 2^63 * 4 and 2^63 * 3 both overflow uint64. Naive wrap compares 0 >= 2^63.
+	const uint64_t half = 1ULL << 63;
+	Expect(CumulativeCrossesCut(half, half, 3, 4), "full bytes crosses 3/4 without __int128");
+	Expect(!CumulativeCrossesCut(half / 2, half, 3, 4), "quarter of bytes does not cross 3/4");
+	Expect(CumulativeCrossesCut(~0ULL, ~0ULL, 1, 1), "max uint64 full product still compares");
+	Expect(!CumulativeCrossesCut(1, ~0ULL, 1, 2), "tiny cumulative vs huge total stays below 1/2");
+}
+
 static void TestFormatInventoryDiagnosticsJoinsAll() {
 	lakemon::InventoryDiagnostic first;
 	first.schema_name = "main";
@@ -530,6 +547,7 @@ int main() {
 	TestOneFileDoesNotHintMerge();
 	TestPipelineStepsAreIndependent();
 	TestGlobalExpireCleanupSkipSemantics();
+	TestCumulativeCrossesCutIsOverflowSafe();
 	TestFormatInventoryDiagnosticsJoinsAll();
 	if (TestFailures()) {
 		std::cerr << TestFailures() << " failure(s)" << std::endl;

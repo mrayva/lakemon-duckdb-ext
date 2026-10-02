@@ -152,12 +152,41 @@ inline uint64_t SaturatingAdd(uint64_t a, uint64_t b) {
 	return a + b;
 }
 
-// cum / total >= i / n, overflow-safe.
+// Portable unsigned 128-bit product. Avoids unsigned __int128 (MSVC C4235).
+inline void UMul128(uint64_t x, uint64_t y, uint64_t &hi, uint64_t &lo) {
+	const uint64_t x0 = x & 0xffffffffULL;
+	const uint64_t x1 = x >> 32;
+	const uint64_t y0 = y & 0xffffffffULL;
+	const uint64_t y1 = y >> 32;
+	const uint64_t p00 = x0 * y0;
+	const uint64_t p01 = x0 * y1;
+	const uint64_t p10 = x1 * y0;
+	const uint64_t p11 = x1 * y1;
+	const uint64_t mid = (p00 >> 32) + (p01 & 0xffffffffULL) + (p10 & 0xffffffffULL);
+	lo = (p00 & 0xffffffffULL) | (mid << 32);
+	hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+}
+
+// a * b >= c * d without wrapping uint64_t products.
+inline bool ProductGreaterEqual(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+	uint64_t a_hi = 0;
+	uint64_t a_lo = 0;
+	uint64_t c_hi = 0;
+	uint64_t c_lo = 0;
+	UMul128(a, b, a_hi, a_lo);
+	UMul128(c, d, c_hi, c_lo);
+	if (a_hi != c_hi) {
+		return a_hi > c_hi;
+	}
+	return a_lo >= c_lo;
+}
+
+// cum / total >= i / n, overflow-safe on MSVC and 64-bit hosts.
 inline bool CumulativeCrossesCut(uint64_t cumulative, uint64_t total, uint64_t i, uint64_t n) {
 	if (n == 0 || i == 0 || total == 0) {
 		return false;
 	}
-	return static_cast<unsigned __int128>(cumulative) * n >= static_cast<unsigned __int128>(total) * i;
+	return ProductGreaterEqual(cumulative, n, total, i);
 }
 
 inline bool SameThreshold(double a, double b) noexcept {
