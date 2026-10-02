@@ -1,3 +1,12 @@
+<p align="center">
+  <img src="docs/logo.png" alt="lakemon" width="200">
+</p>
+
+<p align="center">
+  <a href="https://github.com/paulosuzart/lakemon-duckdb-ext/actions/workflows/PolicyTests.yml"><img src="https://github.com/paulosuzart/lakemon-duckdb-ext/actions/workflows/PolicyTests.yml/badge.svg?branch=main" alt="Policy tests"></a>
+  <a href="https://github.com/paulosuzart/lakemon-duckdb-ext/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/paulosuzart/lakemon-duckdb-ext/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=main" alt="Main Extension Distribution Pipeline"></a>
+</p>
+
 # lakemon
 
 **Maintain a DuckLake from SQL: expire old snapshots, rewrite files with deleted rows (worst first, in byte-weighted steps), and merge small files into right-sized ones.** One `CALL` per table pass, one `CALL` for catalog retention, and a result row for every step it took.
