@@ -65,7 +65,7 @@ default
 query II
 SELECT status, details FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', max_rewrite_steps => 4);
 ----
-ok	max_rewrite_steps=4; byte_budget=none
+ok	max_rewrite_steps=4; byte_budget=none; min_delete_ratio=0.01
 
 query II
 SELECT max_value, source FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
@@ -81,7 +81,7 @@ SELECT max_value, source FROM lakemon_policy() WHERE kind = 'rewrite_ladder';
 query I
 SELECT notes FROM lakemon_policy('lake') WHERE kind = 'rewrite_ladder';
 ----
-max_rewrite_steps=4; byte_budget=none
+max_rewrite_steps=4; byte_budget=none; min_delete_ratio=0.01
 
 query II
 SELECT status, details FROM lakemon_set_policy('lake', 'merge_tier', 'micro', target_file_size => '8MB', max_compacted_files => 128);
@@ -126,6 +126,11 @@ error
 
 query I
 SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', max_rewrite_steps => 0);
+----
+error
+
+query I
+SELECT status FROM lakemon_set_policy('lake', 'rewrite_ladder', 'default', min_delete_ratio => 0);
 ----
 error
 

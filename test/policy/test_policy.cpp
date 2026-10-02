@@ -57,6 +57,7 @@ static void TestDefaultLadderIsByteWeighted() {
 	Expect(ladder.max_rewrite_steps == 3, "default max_rewrite_steps is 3");
 	Expect(ladder.max_rewrite_steps <= kMaxRewriteStepsLimit, "default is within 1–16");
 	Expect(ladder.byte_budget == 0, "byte_budget unset");
+	Expect(std::abs(ladder.min_delete_ratio - 0.01) < 1e-15, "default min_delete_ratio is 0.01");
 }
 
 static void TestValidateRejectsZeroAndOversizeSteps() {
@@ -71,6 +72,17 @@ static void TestValidateRejectsZeroAndOversizeSteps() {
 	too_many.max_rewrite_steps = 17;
 	Expect(!ValidateRewriteLadder(too_many, error), "max_rewrite_steps 17 rejected");
 	Expect(error.find("max_rewrite_steps") != std::string::npos, "upper bound message");
+
+	error.clear();
+	RewriteLadder zero_ratio = DefaultRewriteLadder();
+	zero_ratio.min_delete_ratio = 0.0;
+	Expect(!ValidateRewriteLadder(zero_ratio, error), "min_delete_ratio 0 rejected");
+	Expect(error.find("min_delete_ratio") != std::string::npos, "min_delete_ratio message");
+
+	error.clear();
+	RewriteLadder over_ratio = DefaultRewriteLadder();
+	over_ratio.min_delete_ratio = 1.5;
+	Expect(!ValidateRewriteLadder(over_ratio, error), "min_delete_ratio > 1 rejected");
 }
 
 static void TestEqualSizeFilesCutThreeThresholds() {
@@ -226,8 +238,37 @@ static void TestZeroRecordFileWithDeletesHasRatioOne() {
 	FileStat listed;
 	listed.delete_file_size_bytes = 16;
 	listed.record_count = 0;
-	listed.delete_count = 1;
+	listed.delete_count = 0;
+	listed.file_size_bytes = 80;
+	Expect(std::abs(DeleteRatio(listed) - 0.2) < 1e-12, "list_files uses size ratio, not 1.0");
 	Expect(HasPositiveDeleteFraction(listed), "list_files delete file is dirty");
+}
+
+static void TestMinDeleteRatioExcludesGiantNearClean() {
+	const auto files = std::vector<FileStat>{
+	    MakeFile(1, 1, 1000000, 800000000), // ~1e-6 — huge near-clean
+	    MakeFile(2, 90, 100, 100),
+	    MakeFile(3, 50, 100, 100),
+	    MakeFile(4, 10, 100, 100),
+	};
+	const auto rungs = PlanRewriteRungs(files);
+	Expect(rungs.size() == 3, "giant below min_delete_ratio does not collapse the ladder");
+	Expect(std::abs(rungs[0].delete_threshold - 0.90) < 1e-12, "first cut stays 0.90");
+	Expect(std::abs(rungs.back().delete_threshold - 0.10) < 1e-12, "floor is 0.10 not 1e-6");
+	for (const auto &step : rungs) {
+		for (const auto &file : step.files) {
+			Expect(file.data_file_id != 1, "giant near-clean file is excluded");
+			Expect(DeleteRatio(file) >= kDefaultMinDeleteRatio, "rung files meet min_delete_ratio");
+		}
+		Expect(step.delete_threshold > 0.0, "planned threshold stays positive");
+	}
+
+	RewriteLadder open = DefaultRewriteLadder();
+	open.min_delete_ratio = 1e-9;
+	const auto unfiltered = PlanRewriteRungs(files, open);
+	Expect(!unfiltered.empty(), "tiny floor still plans");
+	Expect(std::abs(unfiltered.back().delete_threshold - 1e-6) < 1e-12,
+	       "without a 0.01 floor the giant would set the last cut");
 }
 
 static void TestInvalidLadderFailsClosed() {
@@ -261,7 +302,7 @@ static void TestMaxRewriteStepsIsLadderSize() {
 static void TestZeroRatioSliceIsSkipped() {
 	FileStat zero = MakeFile(1, 0, 1000, 100);
 	PlannedRewriteStep out;
-	Expect(!FinishRewriteRung("rung_1", {zero}, 0, 0.0, 0.1, out), "min ratio 0 skips the rung");
+	Expect(!FinishRewriteRung("rung_1", {zero}, 0, 0.0, 0.1, 0.01, out), "min ratio 0 skips the rung");
 	Expect(!lakemon::ShouldEmitRewriteCall(0.0), "threshold 0 is never a lakemon rewrite CALL");
 	Expect(!lakemon::ShouldEmitRewriteCall(-0.1), "negative threshold is never a lakemon rewrite CALL");
 	Expect(lakemon::ShouldEmitRewriteCall(0.05), "positive threshold may emit");
@@ -271,10 +312,44 @@ static void TestZeroRatioFileDoesNotPoisonPositiveRung() {
 	FileStat dirty = MakeFile(1, 20000, 40000, 100);
 	FileStat zero = MakeFile(2, 0, 1000, 50);
 	PlannedRewriteStep out;
-	Expect(FinishRewriteRung("rung_1", {dirty, zero}, 0, 0.5, 0.5, out), "positive files remain");
+	Expect(FinishRewriteRung("rung_1", {dirty, zero}, 0, 0.5, 0.5, 0.01, out), "positive files remain");
 	Expect(out.files.size() == 1 && out.files[0].data_file_id == 1, "zero-ratio file is dropped");
 	Expect(out.delete_threshold > 0.0, "threshold stays positive");
 	Expect(lakemon::ShouldEmitRewriteCall(out.delete_threshold), "remaining rung is emittable");
+}
+
+static void TestDuplicateThresholdMergesFiles() {
+	PlannedRewriteStep first;
+	Expect(FinishRewriteRung("rung_1", {MakeFile(1, 50, 100, 40)}, 0, 0.5, 0.5, 0.01, first), "first slice");
+	PlannedRewriteStep second;
+	Expect(FinishRewriteRung("rung_1", {MakeFile(2, 50, 100, 60), MakeFile(1, 50, 100, 40)}, 0, 0.5, 0.5, 0.01, second),
+	       "second slice shares a file id");
+	Expect(SameThreshold(first.delete_threshold, second.delete_threshold), "same data-driven threshold");
+	MergeRewriteRung(first, std::move(second));
+	Expect(first.files.size() == 2, "duplicate threshold merges slices instead of dropping");
+	Expect(first.planned_bytes == 100, "planned bytes refreshed");
+	Expect(first.planned_deletes == 100, "planned deletes refreshed");
+	bool saw1 = false;
+	bool saw2 = false;
+	for (const auto &file : first.files) {
+		saw1 = saw1 || file.data_file_id == 1;
+		saw2 = saw2 || file.data_file_id == 2;
+	}
+	Expect(saw1 && saw2, "dedupe keeps both file ids");
+}
+
+static void TestListFilesSizeRatioCanBeExcluded() {
+	FileStat listed;
+	listed.data_file_id = 9;
+	listed.file_size_bytes = 1000000;
+	listed.delete_file_size_bytes = 100; // 1e-4
+	listed.record_count = 0;
+	listed.delete_count = 0;
+	Expect(std::abs(DeleteRatio(listed) - 1e-4) < 1e-12, "conservative size ratio");
+	Expect(!QualifiesForRewrite(listed, kDefaultMinDeleteRatio), "below default min_delete_ratio");
+	const auto rungs = PlanRewriteRungs({listed, MakeFile(1, 50, 100, 100)});
+	Expect(rungs.size() == 1, "real dirty file still plans");
+	Expect(rungs[0].files.size() == 1 && rungs[0].files[0].data_file_id == 1, "list_files near-clean is excluded");
 }
 
 static void TestDeletedBytesUsesCount() {
@@ -440,10 +515,13 @@ int main() {
 	TestByteBudgetCapsARung();
 	TestFirstFileMayExceedBudgetToMakeProgress();
 	TestZeroRecordFileWithDeletesHasRatioOne();
+	TestMinDeleteRatioExcludesGiantNearClean();
 	TestInvalidLadderFailsClosed();
 	TestMaxRewriteStepsIsLadderSize();
 	TestZeroRatioSliceIsSkipped();
 	TestZeroRatioFileDoesNotPoisonPositiveRung();
+	TestDuplicateThresholdMergesFiles();
+	TestListFilesSizeRatioCanBeExcluded();
 	TestDeletedBytesUsesCount();
 	TestMultiRungPlanEmitsDistinctCalls();
 	TestCutsUseBytesNotDeleteCount();

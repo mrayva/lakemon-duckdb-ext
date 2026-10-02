@@ -89,7 +89,7 @@ Table work only. Does **not** run `ducklake_expire_snapshots`, `ducklake_cleanup
 
 `table` may be `table` (schema `main`) or `schema.table`. Catalog-wide `CALL lakemon_maintain('lake')` still loops tables for flush / rewrite / merge only.
 
-Named parameters override table-scoped work for that invocation. Catalog-wide maintain skips tables with `auto_compact = false`; an explicit table argument still maintains that table. When DuckLake `rewrite_delete_threshold` is set in **(0, 1]** (table → schema → global), lakemon emits **one** rewrite `CALL` with that value (full override of per-rung thresholds and CALL count). If the catalog value is **<= 0**, rewrite is skipped for that table this cycle (flush and merge still run); lakemon never emits `delete_threshold` 0.0. Files already planned stay in that one step; `max_rewrite_steps` / `byte_budget` have already been applied, and files with no delete data stay skipped. Otherwise each planned byte-weighted rung is its own `ducklake_rewrite_data_files` `CALL`. `target_file_size` informs the merge target and is not overwritten when already set on the catalog.
+Named parameters override table-scoped work for that invocation. Catalog-wide maintain skips tables with `auto_compact = false`; an explicit table argument still maintains that table. When DuckLake `rewrite_delete_threshold` is set in **(0, 1]** (table → schema → global), lakemon emits **one** rewrite `CALL` with that value (full override of per-rung thresholds and CALL count) and keeps only files whose delete fraction is **>=** that catalog value. If none remain, rewrite is skipped. If the catalog value is **<= 0**, rewrite is skipped for that table this cycle (flush and merge still run); lakemon never emits `delete_threshold` 0.0. `max_rewrite_steps` / `byte_budget` / `min_delete_ratio` have already been applied. Otherwise each planned byte-weighted rung is its own `ducklake_rewrite_data_files` `CALL`. `target_file_size` informs the merge target and is not overwritten when already set on the catalog.
 
 Execution order:
 
@@ -141,7 +141,7 @@ Zero-argument form returns the built-in ladder and merge bands. With a catalog n
 | `name` | `default` (rewrite ladder), or `micro` / `small` / `medium` |
 | `min_value` / `max_value` | rewrite ladder rung range (`1` / `max_rewrite_steps`), or merge file-size band |
 | `threshold_or_target` | `data-driven` (rewrite) or merge `target_file_size` |
-| `notes` | `max_rewrite_steps` / `byte_budget`, or `max_compacted_files` |
+| `notes` | `max_rewrite_steps` / `byte_budget` / `min_delete_ratio`, or `max_compacted_files` |
 | `source` | `default` or `override` |
 
 ### `CALL lakemon_set_policy(catalog, kind, name, …)`
@@ -151,6 +151,7 @@ Writes the rewrite ladder or one merge band into `__lakemon.policy` in the **cur
 | Named parameter | Type | Applies to |
 | --- | --- | --- |
 | `max_rewrite_steps` | `BIGINT` | `rewrite_ladder` (ladder size `N`; `1`–`16`; default `3`) |
+| `min_delete_ratio` | `DOUBLE` | `rewrite_ladder` (pool floor in `(0, 1]`; default `0.01`) |
 | `byte_budget` | `BIGINT` | `rewrite_ladder` (`0` = unset; optional per-rung size cap) |
 | `min_file_size` / `max_file_size` | `BIGINT` | `merge_tier` (`min < max`) |
 | `target_file_size` | `VARCHAR` | `merge_tier` |
@@ -166,18 +167,19 @@ Precedence for maintain/stats: **built-in defaults → persisted lakemon policy 
 
 Files are **not** split into equal-width `delete_threshold` steps (`0.1`, `0.2`, …), equal-count chunks, or absolute `delete_count` high/medium/low bands.
 
-Instead, lakemon considers only files with a **positive delete fraction** (`delete_count > 0`, or a delete file when record count is unknown). Those files are ordered by delete fraction descending (worst first). The planner walks cumulative `file_size_bytes` and cuts a ladder of `N = max_rewrite_steps` thresholds when the running total crosses `total_bytes * i/N`. Each cut becomes one `ducklake_rewrite_data_files` `CALL` with that data-driven `delete_threshold`. Duplicate cuts (same threshold) are collapsed. Optional `byte_budget` can trim a rung after the cuts are chosen.
+Instead, lakemon considers only files whose delete fraction is **at least `min_delete_ratio`** (default `0.01`). Files below that floor are excluded from the byte pool and from rung membership so a huge near-clean file cannot collapse the ladder. Qualifying files are ordered by delete fraction descending (worst first). The planner walks cumulative `file_size_bytes` and cuts a ladder of `N = max_rewrite_steps` thresholds when the running total crosses `total_bytes * i/N`. Each cut becomes one `ducklake_rewrite_data_files` `CALL` with that data-driven `delete_threshold`. Duplicate cuts (same threshold) merge their file slices. Optional `byte_budget` can trim a rung after the cuts are chosen.
 
-The ladder **never** ends at `0.0`. The last (most inclusive) threshold is the **smallest observed positive delete fraction** among files with deletes. A table with no delete data skips rewrite (flush and merge still run). A rung whose threshold would be **<= 0** is skipped.
+The ladder **never** ends at `0.0`. The last (most inclusive) threshold is the **smallest observed delete fraction among files that meet `min_delete_ratio`**. A table with no qualifying delete data skips rewrite (flush and merge still run). A rung whose threshold would be **<= 0** is skipped.
 
 lakemon **never** uses `delete_threshold` 0.0 — that native threshold matches every file in the table, including ones with no deletes. If you still want a zero threshold, call DuckLake directly: `CALL ducklake_rewrite_data_files('lake', 't', delete_threshold => 0)`.
 
 | Knob | Default | Meaning |
 | --- | --- | --- |
 | `max_rewrite_steps` | `3` (`1`–`16`) | How many byte-weighted cuts to emit |
+| `min_delete_ratio` | `0.01` (`(0, 1]`) | Exclude files below this delete fraction from the ladder |
 | `byte_budget` | unset | Optional per-rung size cap |
 
-Adaptive rewrite uses `delete_count` / `record_count` from DuckLake metadata. The `ducklake_list_files` fallback does not expose counts (`delete_count` is synthesized as `1` when a delete file exists, `record_count` is `0` → fraction `1.0`).
+Adaptive rewrite uses `delete_count` / `record_count` from DuckLake metadata. The `ducklake_list_files` fallback does not expose counts; it synthesizes a conservative fraction from `delete_file_size_bytes / file_size_bytes` (clamped to `(0, 1]`). Metadata inventory is still required for accurate count-based ladders.
 
 A single near-zero threshold would rewrite every dirty file in one `CALL` (time / memory / CPU). Byte-weighted rungs slice that work: an early high-fraction cut rewrites the worst files first; later cuts lower the threshold as more bytes accumulate.
 

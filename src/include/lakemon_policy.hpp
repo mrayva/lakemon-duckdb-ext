@@ -24,6 +24,7 @@ static constexpr const char *kSourceOverride = "override";
 
 static constexpr uint64_t kDefaultMaxRewriteSteps = 3;
 static constexpr uint64_t kMaxRewriteStepsLimit = 16;
+static constexpr double kDefaultMinDeleteRatio = 0.01;
 
 struct FileStat {
 	std::string schema_name;
@@ -38,11 +39,13 @@ struct FileStat {
 // Byte-weighted delete_threshold ladder. N = max_rewrite_steps cuts when
 // cumulative file_size_bytes crosses total_bytes * i/N. Thresholds are the
 // delete fraction of the file that crosses each cut (worst-first). The last
-// cut is always the smallest observed positive delete fraction — never 0.0.
+// cut is the smallest observed fraction among files that meet min_delete_ratio
+// — never 0.0. Files below min_delete_ratio are excluded from the byte pool.
 struct RewriteLadder {
 	// 0 = unset. Optional per-rung size cap after cuts are chosen.
 	uint64_t byte_budget = 0;
 	uint64_t max_rewrite_steps = kDefaultMaxRewriteSteps;
+	double min_delete_ratio = kDefaultMinDeleteRatio;
 };
 
 struct MergeTier {
@@ -67,6 +70,7 @@ struct StoredPolicyRow {
 	uint64_t low_min = 0;
 	uint64_t byte_budget = 0;
 	uint64_t max_rewrite_steps = 0;
+	double min_delete_ratio = 0;
 };
 
 // Sparse field patch from CALL lakemon_set_policy named parameters.
@@ -75,6 +79,8 @@ struct PolicyFieldPatch {
 	uint64_t byte_budget = 0;
 	bool set_max_rewrite_steps = false;
 	uint64_t max_rewrite_steps = 0;
+	bool set_min_delete_ratio = false;
+	double min_delete_ratio = 0;
 	bool set_min_file_size = false;
 	uint64_t min_file_size = 0;
 	bool set_max_file_size = false;
@@ -112,14 +118,27 @@ inline uint64_t DeletedBytes(const FileStat &file) {
 }
 
 inline double DeleteRatio(const FileStat &file) {
-	if (file.record_count == 0) {
-		return file.delete_count > 0 || file.delete_file_size_bytes > 0 ? 1.0 : 0.0;
+	if (file.record_count > 0) {
+		return std::min(1.0, static_cast<double>(file.delete_count) / static_cast<double>(file.record_count));
 	}
-	return std::min(1.0, static_cast<double>(file.delete_count) / static_cast<double>(file.record_count));
+	// record_count unknown (ducklake_list_files fallback): conservative size ratio.
+	if (file.file_size_bytes > 0 && file.delete_file_size_bytes > 0) {
+		return std::min(1.0, static_cast<double>(file.delete_file_size_bytes) /
+		                         static_cast<double>(file.file_size_bytes));
+	}
+	if (file.delete_file_size_bytes > 0 || file.delete_count > 0) {
+		return 1.0;
+	}
+	return 0.0;
 }
 
 inline bool HasPositiveDeleteFraction(const FileStat &file) {
 	return DeleteRatio(file) > 0.0;
+}
+
+inline bool QualifiesForRewrite(const FileStat &file, double min_delete_ratio) {
+	const double ratio = DeleteRatio(file);
+	return ratio > 0.0 && ratio >= min_delete_ratio;
 }
 
 inline std::string RewriteRungName(std::size_t index_1based) {
@@ -149,6 +168,10 @@ inline bool SameThreshold(double a, double b) noexcept {
 inline bool ValidateRewriteLadder(const RewriteLadder &ladder, std::string &error) {
 	if (ladder.max_rewrite_steps < 1 || ladder.max_rewrite_steps > kMaxRewriteStepsLimit) {
 		error = "lakemon: max_rewrite_steps must be between 1 and 16";
+		return false;
+	}
+	if (!(ladder.min_delete_ratio > 0.0 && ladder.min_delete_ratio <= 1.0)) {
+		error = "lakemon: min_delete_ratio must be in (0, 1]";
 		return false;
 	}
 	return true;
@@ -220,6 +243,7 @@ inline bool PositiveRewriteThreshold(double value) noexcept {
 
 static constexpr const char *kSkipNonPositiveRewriteThreshold =
     "rewrite_delete_threshold<=0; use native CALL ducklake_rewrite_data_files(..., delete_threshold => 0)";
+static constexpr const char *kSkipCatalogThresholdMiss = "no files meet catalog rewrite_delete_threshold";
 
 inline bool ValidateMergeTier(const MergeTier &tier, std::string &error) {
 	if (tier.name.empty()) {
@@ -281,12 +305,13 @@ inline bool IsRewriteLadderName(const std::string &name) noexcept {
 }
 
 inline bool PatchHasField(const PolicyFieldPatch &patch) noexcept {
-	return patch.set_byte_budget || patch.set_max_rewrite_steps || patch.set_min_file_size ||
-	       patch.set_max_file_size || patch.set_target_file_size || patch.set_max_compacted_files;
+	return patch.set_byte_budget || patch.set_max_rewrite_steps || patch.set_min_delete_ratio ||
+	       patch.set_min_file_size || patch.set_max_file_size || patch.set_target_file_size ||
+	       patch.set_max_compacted_files;
 }
 
 inline bool PatchHasRewriteField(const PolicyFieldPatch &patch) noexcept {
-	return patch.set_byte_budget || patch.set_max_rewrite_steps;
+	return patch.set_byte_budget || patch.set_max_rewrite_steps || patch.set_min_delete_ratio;
 }
 
 inline bool PatchHasMergeField(const PolicyFieldPatch &patch) noexcept {
@@ -361,6 +386,9 @@ inline bool ApplyPolicyPatch(ActivePolicy &policy, const std::string &kind, cons
 		if (patch.set_max_rewrite_steps) {
 			next.max_rewrite_steps = patch.max_rewrite_steps;
 		}
+		if (patch.set_min_delete_ratio) {
+			next.min_delete_ratio = patch.min_delete_ratio;
+		}
 		if (!ValidateRewriteLadder(next, error)) {
 			return false;
 		}
@@ -404,6 +432,7 @@ inline StoredPolicyRow RowFromLadder(const RewriteLadder &ladder) {
 	row.name = kLadderName;
 	row.byte_budget = ladder.byte_budget;
 	row.max_rewrite_steps = ladder.max_rewrite_steps;
+	row.min_delete_ratio = ladder.min_delete_ratio;
 	return row;
 }
 
@@ -432,6 +461,9 @@ inline bool OverlayStoredRow(ActivePolicy &policy, const StoredPolicyRow &row, s
 		next.byte_budget = row.byte_budget;
 		next.max_rewrite_steps =
 		    row.max_rewrite_steps == 0 ? kDefaultMaxRewriteSteps : row.max_rewrite_steps;
+		next.min_delete_ratio = (row.min_delete_ratio > 0.0 && row.min_delete_ratio <= 1.0)
+		                            ? row.min_delete_ratio
+		                            : kDefaultMinDeleteRatio;
 		if (!ValidateRewriteLadder(next, error)) {
 			return false;
 		}
@@ -505,11 +537,39 @@ inline bool SortDirtyWorstFirst(const FileStat &a, const FileStat &b) {
 	return a.data_file_id < b.data_file_id;
 }
 
+inline void RefreshRewriteStepTotals(PlannedRewriteStep &step) {
+	step.planned_bytes = 0;
+	step.planned_deletes = 0;
+	for (const auto &file : step.files) {
+		step.planned_bytes += file.file_size_bytes;
+		step.planned_deletes += file.delete_count;
+	}
+}
+
+inline bool RungHasFileId(const PlannedRewriteStep &step, uint64_t data_file_id) {
+	for (const auto &file : step.files) {
+		if (file.data_file_id == data_file_id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+inline void MergeRewriteRung(PlannedRewriteStep &dst, PlannedRewriteStep &&src) {
+	for (auto &file : src.files) {
+		if (!RungHasFileId(dst, file.data_file_id)) {
+			dst.files.push_back(std::move(file));
+		}
+	}
+	RefreshRewriteStepTotals(dst);
+}
+
 // Build one CALL from a cut threshold and the files newly covered by it.
 // byte_budget may raise the threshold (worst-first trim) so the native CALL
 // matches the planned slice. Threshold is never <= 0.
 inline bool FinishRewriteRung(const std::string &band, std::vector<FileStat> files, uint64_t byte_budget,
-                              double cut_threshold, double floor_threshold, PlannedRewriteStep &out) {
+                              double cut_threshold, double floor_threshold, double min_delete_ratio,
+                              PlannedRewriteStep &out) {
 	if (files.empty()) {
 		return false;
 	}
@@ -518,7 +578,7 @@ inline bool FinishRewriteRung(const std::string &band, std::vector<FileStat> fil
 	std::vector<FileStat> positive;
 	positive.reserve(files.size());
 	for (auto &file : files) {
-		if (HasPositiveDeleteFraction(file)) {
+		if (QualifiesForRewrite(file, min_delete_ratio)) {
 			positive.push_back(std::move(file));
 		}
 	}
@@ -527,16 +587,12 @@ inline bool FinishRewriteRung(const std::string &band, std::vector<FileStat> fil
 		return false;
 	}
 	double threshold = cut_threshold;
-	if (!PositiveRewriteThreshold(threshold)) {
+	if (!PositiveRewriteThreshold(threshold) || threshold < min_delete_ratio) {
 		threshold = floor_threshold;
 	}
 	double min_kept = 1.0;
-	uint64_t planned_bytes = 0;
-	uint64_t planned_deletes = 0;
 	for (const auto &file : files) {
 		min_kept = std::min(min_kept, DeleteRatio(file));
-		planned_bytes += file.file_size_bytes;
-		planned_deletes += file.delete_count;
 	}
 	if (min_kept > threshold) {
 		threshold = min_kept;
@@ -544,14 +600,16 @@ inline bool FinishRewriteRung(const std::string &band, std::vector<FileStat> fil
 	if (threshold < floor_threshold) {
 		threshold = floor_threshold;
 	}
+	if (threshold < min_delete_ratio) {
+		threshold = min_delete_ratio;
+	}
 	if (!PositiveRewriteThreshold(threshold)) {
 		return false;
 	}
 	out.band = band;
 	out.files = std::move(files);
 	out.delete_threshold = threshold;
-	out.planned_bytes = planned_bytes;
-	out.planned_deletes = planned_deletes;
+	RefreshRewriteStepTotals(out);
 	return true;
 }
 
@@ -595,10 +653,11 @@ inline std::vector<double> ByteWeightedCuts(const std::vector<FileStat> &dirty, 
 	return cuts;
 }
 
-// Only files with a positive delete fraction. Sort worst-first (ratio DESC).
+// Files that meet min_delete_ratio, sorted worst-first (ratio DESC).
 // Walk cumulative file_size_bytes; emit a threshold when the running total
-// crosses total_bytes * i/N. Last cut is the smallest observed positive
-// fraction (never 0.0). Invalid ladders fail closed (no rungs).
+// crosses total_bytes * i/N. Last cut is the smallest observed fraction in
+// that pool (never 0.0, never below min_delete_ratio). Invalid ladders fail
+// closed (no rungs). Duplicate thresholds merge slices instead of dropping.
 inline std::vector<PlannedRewriteStep> PlanRewriteRungs(const std::vector<FileStat> &files,
                                                         const RewriteLadder &ladder,
                                                         std::string *error_out = nullptr) {
@@ -613,7 +672,7 @@ inline std::vector<PlannedRewriteStep> PlanRewriteRungs(const std::vector<FileSt
 	double floor_threshold = 1.0;
 	uint64_t total_bytes = 0;
 	for (const auto &file : files) {
-		if (!HasPositiveDeleteFraction(file)) {
+		if (!QualifiesForRewrite(file, ladder.min_delete_ratio)) {
 			continue;
 		}
 		const double ratio = DeleteRatio(file);
@@ -623,6 +682,9 @@ inline std::vector<PlannedRewriteStep> PlanRewriteRungs(const std::vector<FileSt
 	}
 	if (dirty.empty() || !PositiveRewriteThreshold(floor_threshold)) {
 		return {};
+	}
+	if (floor_threshold < ladder.min_delete_ratio) {
+		floor_threshold = ladder.min_delete_ratio;
 	}
 	std::sort(dirty.begin(), dirty.end(), SortDirtyWorstFirst);
 
@@ -648,7 +710,7 @@ inline std::vector<PlannedRewriteStep> PlanRewriteRungs(const std::vector<FileSt
 			break;
 		}
 		// Last rung also takes any leftover dirty files so the floor CALL
-		// can reach every file with deletes.
+		// can reach every file that met min_delete_ratio.
 		if (i + 1 == cuts.size()) {
 			while (file_idx < dirty.size()) {
 				slice.push_back(dirty[file_idx]);
@@ -657,8 +719,10 @@ inline std::vector<PlannedRewriteStep> PlanRewriteRungs(const std::vector<FileSt
 		}
 		PlannedRewriteStep step;
 		if (FinishRewriteRung(RewriteRungName(rungs.size() + 1), std::move(slice), ladder.byte_budget, cut,
-		                      floor_threshold, step)) {
-			if (rungs.empty() || !SameThreshold(rungs.back().delete_threshold, step.delete_threshold)) {
+		                      floor_threshold, ladder.min_delete_ratio, step)) {
+			if (!rungs.empty() && SameThreshold(rungs.back().delete_threshold, step.delete_threshold)) {
+				MergeRewriteRung(rungs.back(), std::move(step));
+			} else {
 				rungs.push_back(std::move(step));
 			}
 		}
@@ -720,6 +784,7 @@ inline std::string FormatRewriteLadderNotes(const RewriteLadder &ladder) {
 	} else {
 		out << ladder.byte_budget;
 	}
+	out << "; min_delete_ratio=" << ladder.min_delete_ratio;
 	return out.str();
 }
 
@@ -765,17 +830,19 @@ inline void RefreshRewritePlan(TableHint &hint) {
 
 // Overlay native DuckLake options (table → schema → global) on a table hint.
 // rewrite_delete_threshold, when set in (0, 1], is a FULL override: one
-// band=catalog CALL with that threshold. A catalog value <= 0 skips rewrite
-// (lakemon never emits delete_threshold 0.0). max_rewrite_steps and per-rung
-// byte_budget do not apply after collapse (they already shaped the planned
-// rungs; collapse does not re-budget or emit extra CALLs). Files with no
-// delete data were never planned and stay out. auto_compact is honored by
-// maintain.
+// band=catalog CALL with that threshold. Files whose DeleteRatio is below the
+// catalog value are dropped from the collapsed step. If none remain, rewrite
+// is skipped. A catalog value <= 0 skips rewrite (lakemon never emits
+// delete_threshold 0.0). max_rewrite_steps and per-rung byte_budget do not
+// apply after collapse (they already shaped the planned rungs). Files below
+// min_delete_ratio were never planned and stay out. auto_compact is honored
+// by maintain.
 inline void ApplyNativeOptions(TableHint &hint, const std::vector<OptionBinding> &options) {
 	const ResolvedOption rewrite =
 	    ResolveOption(options, "rewrite_delete_threshold", hint.schema_name, hint.table_name);
 	double catalog_value = 0;
 	bool skip_non_positive = false;
+	bool skip_catalog_empty = false;
 	if (rewrite.found && TryParseDouble(rewrite.value, catalog_value)) {
 		if (catalog_value <= 0.0) {
 			hint.rewrite_steps.clear();
@@ -786,17 +853,25 @@ inline void ApplyNativeOptions(TableHint &hint, const std::vector<OptionBinding>
 			step.delete_threshold = catalog_value;
 			for (const auto &existing : hint.rewrite_steps) {
 				for (const auto &file : existing.files) {
-					step.files.push_back(file);
-					step.planned_bytes += file.file_size_bytes;
-					step.planned_deletes += file.delete_count;
+					if (DeleteRatio(file) >= catalog_value) {
+						step.files.push_back(file);
+					}
 				}
 			}
 			hint.rewrite_steps.clear();
-			hint.rewrite_steps.push_back(std::move(step));
+			if (step.files.empty()) {
+				skip_catalog_empty = true;
+			} else {
+				RefreshRewriteStepTotals(step);
+				hint.rewrite_steps.push_back(std::move(step));
+			}
 		}
 	}
 	if (skip_non_positive) {
 		hint.rewrite_plan = kSkipNonPositiveRewriteThreshold;
+		hint.rewrite_threshold = 0.0;
+	} else if (skip_catalog_empty) {
+		hint.rewrite_plan = kSkipCatalogThresholdMiss;
 		hint.rewrite_threshold = 0.0;
 	} else {
 		RefreshRewritePlan(hint);

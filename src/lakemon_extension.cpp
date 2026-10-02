@@ -373,6 +373,9 @@ static void ParseNamedSetPolicy(TableFunctionBindInput &input, SetPolicyBindData
 		} else if (entry.first == "max_rewrite_steps") {
 			data.patch.set_max_rewrite_steps =
 			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.max_rewrite_steps, "max_rewrite_steps");
+		} else if (entry.first == "min_delete_ratio") {
+			data.patch.set_min_delete_ratio = true;
+			data.patch.min_delete_ratio = entry.second.GetValue<double>();
 		} else if (entry.first == "min_file_size") {
 			data.patch.set_min_file_size =
 			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.min_file_size, "min_file_size");
@@ -503,6 +506,7 @@ static void AddNamedSetPolicyParams(TableFunction &function) {
 	function.named_parameters["reset_all"] = LogicalType::BOOLEAN;
 	function.named_parameters["byte_budget"] = LogicalType::BIGINT;
 	function.named_parameters["max_rewrite_steps"] = LogicalType::BIGINT;
+	function.named_parameters["min_delete_ratio"] = LogicalType::DOUBLE;
 	function.named_parameters["min_file_size"] = LogicalType::BIGINT;
 	function.named_parameters["max_file_size"] = LogicalType::BIGINT;
 	function.named_parameters["target_file_size"] = LogicalType::VARCHAR;

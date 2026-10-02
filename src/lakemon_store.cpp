@@ -31,7 +31,8 @@ static const PolicyColumn kPolicyValueCols[] = {{"kind", "VARCHAR NOT NULL"},
                                                 {"medium_min", "BIGINT"},
                                                 {"low_min", "BIGINT"},
                                                 {"byte_budget", "BIGINT"},
-                                                {"max_rewrite_steps", "BIGINT"}};
+                                                {"max_rewrite_steps", "BIGINT"},
+                                                {"min_delete_ratio", "DOUBLE"}};
 
 static const size_t kPolicyValueColCount = sizeof(kPolicyValueCols) / sizeof(kPolicyValueCols[0]);
 
@@ -41,7 +42,8 @@ static const char *kAlterSQL[] = {"ALTER TABLE __lakemon.policy ADD COLUMN IF NO
                                   "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS medium_min BIGINT",
                                   "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS low_min BIGINT",
                                   "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS byte_budget BIGINT",
-                                  "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS max_rewrite_steps BIGINT"};
+                                  "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS max_rewrite_steps BIGINT",
+                                  "ALTER TABLE __lakemon.policy ADD COLUMN IF NOT EXISTS min_delete_ratio DOUBLE"};
 
 static std::string PolicySelectList() {
 	std::ostringstream sql;
@@ -107,6 +109,9 @@ static std::string PolicyValueLiteral(const policy::StoredPolicyRow &row, const 
 	if (std::strcmp(name, "max_rewrite_steps") == 0) {
 		return std::to_string(row.max_rewrite_steps);
 	}
+	if (std::strcmp(name, "min_delete_ratio") == 0) {
+		return std::to_string(row.min_delete_ratio);
+	}
 	throw InvalidInputException("lakemon: unknown policy column '%s'", name);
 }
 
@@ -161,6 +166,7 @@ static policy::StoredPolicyRow RowFromResult(QueryHandle &result, duckdb::idx_t 
 	row.low_min = static_cast<uint64_t>(CellInt64(result, PolicyCol("low_min"), i));
 	row.byte_budget = static_cast<uint64_t>(CellInt64(result, PolicyCol("byte_budget"), i));
 	row.max_rewrite_steps = static_cast<uint64_t>(CellInt64(result, PolicyCol("max_rewrite_steps"), i));
+	row.min_delete_ratio = CellDouble(result, PolicyCol("min_delete_ratio"), i);
 	return row;
 }
 
