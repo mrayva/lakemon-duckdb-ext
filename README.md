@@ -18,22 +18,22 @@ The policy is inspired by common DuckLake maintain patterns (rewrite heavily del
 
 ## Requirements
 
-- DuckDB **1.5.\*** (built and tested against `v1.5.5`) or DuckDB **2.x** (`v2.0-cyanoptera` / upcoming 2.0)
+- DuckDB **1.5.3**, **1.5.5**, or **1.5.6** (local in-tree builds use the `duckdb` submodule, currently `v1.5.5`) or DuckDB **2.x** (`v2.0-cyanoptera` / upcoming 2.0)
 - The core **`ducklake`** extension loaded in the same session
 - An attached DuckLake catalog (`ATTACH 'ducklake:...' AS lake`)
 
-This extension does not replace `INSTALL ducklake`.
+This extension does not replace `INSTALL ducklake`. A binary built for one DuckDB patch version will not load on another.
 
 ## Install / load
 
-Until the extension is listed on the [DuckDB community extensions](https://duckdb.org/community_extensions) site, load a locally built binary with unsigned extensions enabled:
+Until the extension is listed on the [DuckDB community extensions](https://duckdb.org/community_extensions) site, load an unsigned binary that matches your DuckDB version:
 
 ```sql
 INSTALL lakemon FROM community; -- after the community listing is merged
 LOAD lakemon;
 ```
 
-Local build:
+After a `v*` tag (or **Actions → Main Extension Distribution Pipeline → Run workflow**), download the matching artifact from that run — or from a GitHub Release attached to the tag — named `lakemon-<duckdb_version>-extension-<arch>` (for example `lakemon-v1.5.6-extension-linux_amd64`). Local build path is the same load:
 
 ```shell
 duckdb -unsigned
@@ -43,7 +43,7 @@ duckdb -unsigned
 LOAD 'build/release/extension/lakemon/lakemon.duckdb_extension';
 ```
 
-See [community/README.md](community/README.md) for the remaining steps to list the extension.
+See [community/README.md](community/README.md) for the remaining steps to list the extension. See [docs/UPDATING.md](docs/UPDATING.md) for how to cut that GitHub Release.
 
 ## Usage
 
@@ -230,7 +230,7 @@ The in-tree shell already loads `lakemon`.
 
 - `make policy-test` — rewrite-ladder / merge-tier math, DuckLake option precedence, persisted policy overlays, and generated DuckLake CALL SQL (no DuckDB, seconds)
 - `make test` — SQL smoke: `lakemon_version`, `lakemon_policy` / `lakemon_set_policy`, bind errors / maintain error rows when no catalog is attached, `lakemon_maintain_global` registration and retention skip/plan rows
-- CI: `make policy-test` on every push/PR. Full DuckDB **1.5.5** and **2.x** (`v2.0-cyanoptera`) distribution builds run on `main`, `v*` tags, or **Actions → Main Extension Distribution Pipeline → Run workflow** (use that before a community listing submit).
+- CI: `make policy-test` on every push/PR. Full DuckDB **1.5.5** and **2.x** (`v2.0-cyanoptera`) distribution builds run on `main`, `v*` tags, or **Actions → Main Extension Distribution Pipeline → Run workflow**. DuckDB **1.5.3** and **1.5.6** binaries are built only on `v*` tags or that same **Run workflow** path (not on ordinary pushes to `main`). Artifacts are `lakemon-<duckdb_version>-extension-<arch>` on the workflow run; attach them to a GitHub Release from the `v*` tag. See [docs/UPDATING.md](docs/UPDATING.md).
 
 End-to-end rewrite/merge against a live DuckLake catalog is left to your own lake (CI does not attach a lake). Manual check: `ATTACH` a lake, `CALL lakemon_set_policy(...)` for ladder size / merge bands, `CALL lake.set_option(...)` for the five honored DuckLake keys, then `CALL lakemon_table_stats` / `lakemon_maintain(..., dry_run => true)` and confirm planned rewrite steps (rung + byte-derived threshold, never `0.0`), merge target, and `auto_compact` skips. Confirm expire/cleanup intervals with `CALL lakemon_maintain_global(..., dry_run => true)`.
 
