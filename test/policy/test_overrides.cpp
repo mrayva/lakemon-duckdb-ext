@@ -18,35 +18,44 @@ static FileStat HighChurnFile() {
 	return file;
 }
 
+static FileStat MakeDirty(uint64_t id, uint64_t deletes, uint64_t records, uint64_t bytes) {
+	FileStat file;
+	file.schema_name = "main";
+	file.table_name = "events";
+	file.data_file_id = id;
+	file.delete_count = deletes;
+	file.record_count = records;
+	file.file_size_bytes = bytes;
+	return file;
+}
+
 static void TestDefaultPolicyHasBuiltins() {
 	const auto policy = DefaultPolicy();
-	Expect(policy.rewrite.high_min == 10000, "default high_min");
-	Expect(policy.rewrite.medium_min == 1000, "default medium_min");
-	Expect(policy.rewrite.low_min == 100, "default low_min");
 	Expect(policy.rewrite.max_rewrite_steps == 3, "default max_rewrite_steps");
+	Expect(policy.rewrite.byte_budget == 0, "default byte_budget unset");
 	Expect(policy.tiers.size() == 3, "default tier size");
 	Expect(policy.overridden_keys.empty(), "defaults have no overrides");
 	Expect(!PolicyKeyOverridden(policy, kKindRewriteLadder, kLadderName), "ladder not overridden");
 }
 
-static void TestPatchRewriteFloors() {
+static void TestPatchRewriteSteps() {
 	ActivePolicy policy = DefaultPolicy();
 	PolicyFieldPatch patch;
-	patch.set_high_min = true;
-	patch.high_min = 20000;
+	patch.set_max_rewrite_steps = true;
+	patch.max_rewrite_steps = 8;
 	std::string error;
-	Expect(ApplyPolicyPatch(policy, "rewrite_ladder", "default", patch, error), "patch high_min");
+	Expect(ApplyPolicyPatch(policy, "rewrite_ladder", "default", patch, error), "patch max_rewrite_steps");
 	Expect(error.empty(), "no patch error");
-	Expect(policy.rewrite.high_min == 20000, "high_min overwritten");
-	Expect(policy.rewrite.medium_min == 1000, "other floors kept");
+	Expect(policy.rewrite.max_rewrite_steps == 8, "max_rewrite_steps overwritten");
+	Expect(policy.rewrite.byte_budget == 0, "other knobs kept");
 	Expect(PolicyKeyOverridden(policy, kKindRewriteLadder, kLadderName), "ladder marked override");
 }
 
 static void TestPatchRejectsUnknownAndRange() {
 	ActivePolicy policy = DefaultPolicy();
 	PolicyFieldPatch patch;
-	patch.set_high_min = true;
-	patch.high_min = 20000;
+	patch.set_max_rewrite_steps = true;
+	patch.max_rewrite_steps = 4;
 	std::string error;
 	Expect(!ApplyPolicyPatch(policy, "rewrite_ladder", "hot", patch, error), "unknown ladder name rejected");
 	Expect(error.find("unknown rewrite ladder") != std::string::npos, "unknown name message");
@@ -58,10 +67,10 @@ static void TestPatchRejectsUnknownAndRange() {
 	Expect(!ApplyPolicyPatch(policy, "nope", "default", patch, error), "unknown kind rejected");
 
 	error.clear();
-	patch.high_min = 500;
-	Expect(!ApplyPolicyPatch(policy, "rewrite_ladder", "default", patch, error), "inverted floors rejected");
-	Expect(error.find("high_min") != std::string::npos, "range message");
-	Expect(policy.rewrite.high_min == 10000, "failed patch does not keep invalid value");
+	patch.max_rewrite_steps = 0;
+	Expect(!ApplyPolicyPatch(policy, "rewrite_ladder", "default", patch, error), "zero steps rejected");
+	Expect(error.find("max_rewrite_steps") != std::string::npos, "range message");
+	Expect(policy.rewrite.max_rewrite_steps == 3, "failed patch does not keep invalid value");
 }
 
 static void TestPatchWrongFieldKind() {
@@ -74,33 +83,32 @@ static void TestPatchWrongFieldKind() {
 
 	error.clear();
 	PolicyFieldPatch rewrite;
-	rewrite.set_high_min = true;
-	rewrite.high_min = 20000;
+	rewrite.set_max_rewrite_steps = true;
+	rewrite.max_rewrite_steps = 4;
 	Expect(!ApplyPolicyPatch(policy, "merge_tier", "micro", rewrite, error), "ladder field on tier rejected");
 }
 
 static void TestResetAndResetAllNamed() {
 	ActivePolicy policy = DefaultPolicy();
 	PolicyFieldPatch patch;
-	patch.set_low_min = true;
-	patch.low_min = 50;
+	patch.set_max_rewrite_steps = true;
+	patch.max_rewrite_steps = 8;
 	std::string error;
 	Expect(ApplyPolicyPatch(policy, "REWRITE_LADDER", "DEFAULT", patch, error), "kind/name are case-insensitive");
-	Expect(policy.rewrite.low_min == 50, "patched");
+	Expect(policy.rewrite.max_rewrite_steps == 8, "patched");
 
 	PolicyFieldPatch reset;
 	reset.reset = true;
 	Expect(ApplyPolicyPatch(policy, "rewrite_ladder", "default", reset, error), "reset named");
-	Expect(policy.rewrite.low_min == 100, "low_min restored");
+	Expect(policy.rewrite.max_rewrite_steps == 3, "max_rewrite_steps restored");
 	Expect(!PolicyKeyOverridden(policy, kKindRewriteLadder, kLadderName), "override cleared");
 }
 
 static void TestOverlayStoredRowsSkipsBad() {
 	std::vector<StoredPolicyRow> rows;
 	StoredPolicyRow ok = RowFromLadder(DefaultRewriteLadder());
-	ok.high_min = 20000;
-	ok.medium_min = 2000;
-	ok.low_min = 200;
+	ok.max_rewrite_steps = 8;
+	ok.byte_budget = 1024;
 	rows.push_back(ok);
 
 	StoredPolicyRow bad = ok;
@@ -108,34 +116,35 @@ static void TestOverlayStoredRowsSkipsBad() {
 	rows.push_back(bad);
 
 	StoredPolicyRow invalid = ok;
-	invalid.high_min = 1;
-	invalid.medium_min = 1;
-	invalid.low_min = 1;
+	invalid.max_rewrite_steps = 99;
 	rows.push_back(invalid);
 
 	std::string error;
 	const ActivePolicy policy = OverlayStoredRows(rows, &error);
-	Expect(policy.rewrite.high_min == 20000, "valid overlay applied");
+	Expect(policy.rewrite.max_rewrite_steps == 8, "valid overlay applied");
+	Expect(policy.rewrite.byte_budget == 1024, "valid knobs kept after bad rows");
 	Expect(PolicyKeyOverridden(policy, kKindRewriteLadder, kLadderName), "ladder overlay flagged");
-	Expect(policy.rewrite.medium_min == 2000, "valid floors kept after bad rows");
 	Expect(!error.empty(), "first bad row recorded");
 }
 
-static void TestOverriddenLadderClassifies() {
-	ActivePolicy policy = DefaultPolicy();
-	PolicyFieldPatch patch;
-	patch.set_high_min = true;
-	patch.high_min = 50000;
+static void TestLegacyCountFloorsAreIgnored() {
+	StoredPolicyRow row = RowFromLadder(DefaultRewriteLadder());
+	row.high_min = 50000;
+	row.medium_min = 1;
+	row.low_min = 1;
+	row.max_rewrite_steps = 2;
 	std::string error;
-	Expect(ApplyPolicyPatch(policy, "rewrite_ladder", "default", patch, error), "raise high floor");
+	const ActivePolicy policy = OverlayStoredRows({row}, &error);
+	Expect(error.empty(), "legacy floors do not fail overlay");
+	Expect(policy.rewrite.max_rewrite_steps == 2, "ladder size still overlays");
 
-	FileStat file = HighChurnFile();
-	const auto steps = PlanRewriteRungs(std::vector<FileStat>(1, file), policy.rewrite);
-	Expect(steps.size() == 1 && steps[0].band == "medium", "file no longer meets raised high floor");
-
-	const auto hint = SummarizeTable(std::vector<FileStat>(1, file), policy);
-	Expect(hint.rewrite_steps.size() == 1 && hint.rewrite_steps[0].band == "medium", "summarize uses persisted floors");
-	Expect(std::abs(hint.rewrite_threshold - DeleteRatio(file)) < 1e-9, "threshold is the file's ratio");
+	const auto files = std::vector<FileStat>{
+	    MakeDirty(1, 90, 100, 100),
+	    MakeDirty(2, 10, 100, 100),
+	};
+	const auto steps = PlanRewriteRungs(files, policy.rewrite);
+	Expect(steps.size() == 2, "legacy floors are not bucket keys");
+	Expect(steps[0].files[0].data_file_id == 1, "worst fraction still first");
 }
 
 static void TestOverriddenMergeBand() {
@@ -170,24 +179,13 @@ static void TestNativeOptionsCollapseAdaptiveRungs() {
 	std::string error;
 	Expect(ApplyPolicyPatch(policy, "rewrite_ladder", "default", patch, error), "persist max_rewrite_steps");
 
-	FileStat high = HighChurnFile();
-	FileStat medium;
-	medium.schema_name = "main";
-	medium.table_name = "events";
-	medium.data_file_id = 2;
-	medium.file_size_bytes = 4 * kMiB;
-	medium.record_count = 10000;
-	medium.delete_count = 8000;
-	FileStat tiny;
-	tiny.schema_name = "main";
-	tiny.table_name = "events";
-	tiny.data_file_id = 3;
-	tiny.file_size_bytes = 8000;
-	tiny.record_count = 100;
-	tiny.delete_count = 20; // below low_min
-	TableHint hint = SummarizeTable({high, medium, tiny}, policy);
-	Expect(hint.rewrite_steps.size() == 2, "adaptive plan has two rungs before overlay");
-	Expect(hint.rewrite_steps[0].band == "high", "first planned band is high");
+	FileStat high = MakeDirty(1, 90, 100, 100);
+	FileStat mid = MakeDirty(2, 50, 100, 100);
+	FileStat low = MakeDirty(3, 10, 100, 100);
+	FileStat clean = MakeDirty(4, 0, 100, 100);
+	TableHint hint = SummarizeTable({high, mid, low, clean}, policy);
+	Expect(hint.rewrite_steps.size() == 3, "adaptive plan has three rungs before overlay");
+	Expect(hint.rewrite_steps[0].band == "rung_1", "first planned rung");
 
 	std::vector<OptionBinding> options;
 	OptionBinding catalog;
@@ -201,14 +199,14 @@ static void TestNativeOptionsCollapseAdaptiveRungs() {
 	Expect(std::abs(hint.rewrite_threshold - 0.50) < 1e-9, "DuckLake option is the CALL threshold");
 	Expect(hint.rewrite_plan.find("band=catalog") != std::string::npos, "plan shows catalog step");
 	Expect(hint.rewrite_plan.find("delete_threshold=0.5") != std::string::npos, "catalog plan keeps the operator threshold");
-	Expect(hint.rewrite_steps[0].files.size() == 2, "collapse unions planned rungs only");
-	bool saw_tiny = false;
+	Expect(hint.rewrite_steps[0].files.size() == 3, "collapse unions planned rungs only");
+	bool saw_clean = false;
 	for (const auto &file : hint.rewrite_steps[0].files) {
-		if (file.data_file_id == 3) {
-			saw_tiny = true;
+		if (file.data_file_id == 4) {
+			saw_clean = true;
 		}
 	}
-	Expect(!saw_tiny, "files below low_min stay skipped after catalog collapse");
+	Expect(!saw_clean, "files with no delete data stay skipped after catalog collapse");
 }
 
 static void TestCatalogCollapseHonorsPriorStepCap() {
@@ -224,9 +222,12 @@ static void TestCatalogCollapseHonorsPriorStepCap() {
 	medium.data_file_id = 2;
 	medium.delete_count = 2000;
 	medium.record_count = 4000;
+	medium.file_size_bytes = 4 * kMiB;
 	TableHint hint = SummarizeTable({high, medium}, policy);
-	Expect(hint.rewrite_steps.size() == 1 && hint.rewrite_steps[0].band == "high",
-	       "cap drops medium before catalog overlay");
+	Expect(hint.rewrite_steps.size() == 1, "N=1 is a single floor cut");
+	Expect(std::abs(hint.rewrite_steps[0].delete_threshold -
+	                std::min(DeleteRatio(high), DeleteRatio(medium))) < 1e-12,
+	       "single cut uses the positive floor");
 
 	std::vector<OptionBinding> options;
 	OptionBinding catalog;
@@ -236,8 +237,7 @@ static void TestCatalogCollapseHonorsPriorStepCap() {
 	options.push_back(catalog);
 	ApplyNativeOptions(hint, options);
 	Expect(hint.rewrite_steps.size() == 1, "catalog is a full CALL-count override");
-	Expect(hint.rewrite_steps[0].files.size() == 1 && hint.rewrite_steps[0].files[0].data_file_id == 1,
-	       "collapse does not bring back rungs dropped by max_rewrite_steps");
+	Expect(hint.rewrite_steps[0].files.size() == 2, "N=1 already planned every dirty file");
 	Expect(std::abs(hint.rewrite_threshold - 0.25) < 1e-9, "catalog threshold replaces the derived one");
 }
 
@@ -257,24 +257,23 @@ static void TestMaxRewriteStepsPatch() {
 	Expect(ApplyPolicyPatch(policy, "rewrite_ladder", "default", patch, error), "cap rewrite steps");
 	Expect(policy.rewrite.max_rewrite_steps == 1, "cap stored");
 
-	FileStat high = HighChurnFile();
-	FileStat medium = high;
-	medium.data_file_id = 2;
-	medium.delete_count = 2000;
-	medium.record_count = 4000;
-	const auto hint = SummarizeTable({high, medium}, policy);
+	const auto files = std::vector<FileStat>{
+	    MakeDirty(1, 90, 100, 100),
+	    MakeDirty(2, 10, 100, 100),
+	};
+	const auto hint = SummarizeTable(files, policy);
 	Expect(hint.rewrite_steps.size() == 1, "persisted cap is applied by summarize");
-	Expect(hint.rewrite_steps[0].band == "high", "only high survives the cap");
+	Expect(std::abs(hint.rewrite_steps[0].delete_threshold - 0.10) < 1e-12, "N=1 ends at the floor");
 }
 
 int main() {
 	TestDefaultPolicyHasBuiltins();
-	TestPatchRewriteFloors();
+	TestPatchRewriteSteps();
 	TestPatchRejectsUnknownAndRange();
 	TestPatchWrongFieldKind();
 	TestResetAndResetAllNamed();
 	TestOverlayStoredRowsSkipsBad();
-	TestOverriddenLadderClassifies();
+	TestLegacyCountFloorsAreIgnored();
 	TestOverriddenMergeBand();
 	TestNativeOptionsCollapseAdaptiveRungs();
 	TestCatalogCollapseHonorsPriorStepCap();

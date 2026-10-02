@@ -139,8 +139,8 @@ static std::vector<policy::FileStat> InventoryFromListFiles(duckdb::ClientContex
 				file.file_size_bytes = static_cast<uint64_t>(CellInt64(*listed, 1, i));
 				file.delete_file_size_bytes = static_cast<uint64_t>(CellInt64(*listed, 3, i));
 				// list_files does not expose delete_count. Synthesize 1 so a delete
-				// file is visible; the adaptive ladder still skips it unless low_min
-				// is lowered to 1 (metadata inventory is required for real counts).
+				// file has a positive delete fraction (record_count is 0 → ratio 1.0).
+				// Metadata inventory is required for real counts.
 				file.delete_count = file.delete_file_size_bytes > 0 ? 1 : 0;
 				file.record_count = 0;
 				files.push_back(std::move(file));

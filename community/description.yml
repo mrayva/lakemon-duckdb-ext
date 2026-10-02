@@ -41,7 +41,7 @@ docs:
     lakemon orchestrates native DuckLake maintenance CALLs with a policy layer:
 
     * Catalog SELECT inventory of data files and delete files
-    * Adaptive delete-count rewrite ladder (High / Medium / Low; one ducklake_rewrite_data_files CALL per band)
+    * Byte-weighted adaptive rewrite ladder (delete fraction DESC; one ducklake_rewrite_data_files CALL per byte-cut rung)
     * Merge size bands (micro / small / medium) with per-tier target_file_size
     * Table maintain (lakemon_maintain) vs catalog-global expire/cleanup (lakemon_maintain_global)
     * Execute-by-default; pass dry_run => true to plan only

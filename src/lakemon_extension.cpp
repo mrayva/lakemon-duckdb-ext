@@ -300,8 +300,7 @@ static void EmitPolicy(RowState &state, const lakemon::policy::ActivePolicy &pol
 	        ? lakemon::policy::kSourceOverride
 	        : lakemon::policy::kSourceDefault;
 	state.rows.push_back({Value(lakemon::policy::kKindRewriteLadder), Value(lakemon::policy::kLadderName),
-	                      Value(std::to_string(policy.rewrite.high_min)),
-	                      Value(std::to_string(policy.rewrite.low_min)), Value("data-driven"),
+	                      Value("1"), Value(std::to_string(policy.rewrite.max_rewrite_steps)), Value("data-driven"),
 	                      Value(lakemon::policy::FormatRewriteLadderNotes(policy.rewrite)), Value(source)});
 	for (const auto &tier : policy.tiers) {
 		const char *source = lakemon::policy::PolicyKeyOverridden(policy, lakemon::policy::kKindMergeTier, tier.name)
@@ -368,14 +367,6 @@ static void ParseNamedSetPolicy(TableFunctionBindInput &input, SetPolicyBindData
 			data.patch.reset = BooleanValue::Get(entry.second);
 		} else if (entry.first == "reset_all") {
 			data.reset_all = BooleanValue::Get(entry.second);
-		} else if (entry.first == "high_min") {
-			data.patch.set_high_min =
-			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.high_min, "high_min");
-		} else if (entry.first == "medium_min") {
-			data.patch.set_medium_min =
-			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.medium_min, "medium_min");
-		} else if (entry.first == "low_min") {
-			data.patch.set_low_min = AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.low_min, "low_min");
 		} else if (entry.first == "byte_budget") {
 			data.patch.set_byte_budget =
 			    AsNonNegative(entry.second.GetValue<int64_t>(), data.patch.byte_budget, "byte_budget");
@@ -510,9 +501,6 @@ static void AddNamedGlobalMaintainParams(TableFunction &function) {
 static void AddNamedSetPolicyParams(TableFunction &function) {
 	function.named_parameters["reset"] = LogicalType::BOOLEAN;
 	function.named_parameters["reset_all"] = LogicalType::BOOLEAN;
-	function.named_parameters["high_min"] = LogicalType::BIGINT;
-	function.named_parameters["medium_min"] = LogicalType::BIGINT;
-	function.named_parameters["low_min"] = LogicalType::BIGINT;
 	function.named_parameters["byte_budget"] = LogicalType::BIGINT;
 	function.named_parameters["max_rewrite_steps"] = LogicalType::BIGINT;
 	function.named_parameters["min_file_size"] = LogicalType::BIGINT;

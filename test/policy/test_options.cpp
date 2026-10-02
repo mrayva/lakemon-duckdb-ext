@@ -129,7 +129,8 @@ static void TestTargetAndHintOverlay() {
 	file.record_count = 40000;
 	file.delete_count = 12000;
 	TableHint hint = SummarizeTable(std::vector<FileStat>(1, file));
-	Expect(hint.rewrite_steps.size() == 1 && hint.rewrite_steps[0].band == "high", "12000 deletes → high band");
+	Expect(hint.rewrite_steps.size() == 1 && hint.rewrite_steps[0].band == "rung_1",
+	       "one dirty file → one byte-weighted rung");
 	Expect(std::abs(hint.rewrite_threshold - 0.30) < 1e-9, "derived threshold is the file ratio");
 	ApplyNativeOptions(hint, rows);
 	Expect(hint.rewrite_steps.size() == 1 && hint.rewrite_steps[0].band == "catalog",
