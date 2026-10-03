@@ -15,7 +15,9 @@
 # Run the full matrix (including 1.5.3 / 1.5.6) before cutting a release:
 #   GitHub → Actions → "Main Extension Distribution Pipeline" → Run workflow
 #   (select the branch). Also runs automatically on push to main (1.5.5 + 2.x)
-#   and on v* tags (all four versions).
+#   unless the commit only changes markdown/docs, and on v* tags (all four
+#   versions). Path filters apply to branch pushes only, not to v* tags or
+#   workflow_dispatch.
 #
 name: Main Extension Distribution Pipeline
 on:
@@ -25,6 +27,9 @@ on:
       - main
     tags:
       - 'v*'
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
 
 permissions:
   contents: read
