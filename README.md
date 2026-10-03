@@ -1,4 +1,15 @@
+<p align="center">
+  <img src="docs/logo.png" alt="lakemon" width="200">
+</p>
+
+<p align="center">
+  <a href="https://github.com/paulosuzart/lakemon-duckdb-ext/actions/workflows/PolicyTests.yml"><img src="https://github.com/paulosuzart/lakemon-duckdb-ext/actions/workflows/PolicyTests.yml/badge.svg?branch=main" alt="Policy tests"></a>
+  <a href="https://github.com/paulosuzart/lakemon-duckdb-ext/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/paulosuzart/lakemon-duckdb-ext/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=main" alt="Main Extension Distribution Pipeline"></a>
+</p>
+
 # lakemon
+
+DuckDB extension for DuckLake maintenance.
 
 **Maintain a DuckLake from SQL: expire old snapshots, rewrite files with deleted rows (worst first, in byte-weighted steps), and merge small files into right-sized ones.** One `CALL` per table pass, one `CALL` for catalog retention, and a result row for every step it took.
 
@@ -32,6 +43,7 @@ lakemon does not replace the `ducklake` extension; it requires it.
 ```sql
 INSTALL ducklake;
 LOAD ducklake;
+INSTALL lakemon FROM community;
 LOAD lakemon;
 
 ATTACH 'ducklake:metadata.ducklake' AS lake (DATA_PATH 'data_files');
@@ -62,21 +74,17 @@ CALL lakemon_maintain('lake', 'myschema.t'); CALL lakemon_maintain_global('lake'
 
 ## Install / load
 
-lakemon is not yet listed on the [DuckDB community extensions](https://duckdb.org/community_extensions) site, and prebuilt binaries are not published. Build it locally (see [Building](#building)) and load it with unsigned extensions enabled:
-
-```shell
-duckdb -unsigned
+```sql
+INSTALL ducklake;
+LOAD ducklake;
+INSTALL lakemon FROM community;
+LOAD lakemon;
 ```
+
+Until the community listing is merged, load the locally built artifact with unsigned extensions enabled (`duckdb -unsigned`):
 
 ```sql
 LOAD 'build/release/extension/lakemon/lakemon.duckdb_extension';
-```
-
-Once the community listing is merged, install becomes:
-
-```sql
-INSTALL lakemon FROM community; -- after the community listing is merged
-LOAD lakemon;
 ```
 
 See [community/README.md](community/README.md) for the remaining listing steps.
