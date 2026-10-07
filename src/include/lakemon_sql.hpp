@@ -90,7 +90,7 @@ inline std::string RewriteDataFilesCall(const std::string &catalog, const TableR
 }
 
 inline std::string ExpireSnapshotsCall(const std::string &catalog, const std::string &older_than) {
-	return "CALL ducklake_expire_snapshots(" + QuoteString(catalog) + ", older_than => now() - INTERVAL " +
+	return "CALL ducklake_expire_snapshots(" + QuoteString(catalog) + ", older_than => now()::TIMESTAMP - INTERVAL " +
 	       QuoteString(older_than) + ")";
 }
 
@@ -98,7 +98,7 @@ inline std::string CleanupOldFilesCall(const std::string &catalog, const std::st
 	std::ostringstream sql;
 	sql << "CALL ducklake_cleanup_old_files(" << QuoteString(catalog);
 	if (!older_than.empty()) {
-		sql << ", older_than => now() - INTERVAL " << QuoteString(older_than);
+		sql << ", older_than => now()::TIMESTAMP - INTERVAL " << QuoteString(older_than);
 	} else {
 		sql << ", cleanup_all => true";
 	}

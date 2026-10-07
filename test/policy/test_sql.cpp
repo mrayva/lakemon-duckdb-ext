@@ -63,10 +63,10 @@ static void TestRewriteMergeKeepPositionalTableAndSchema() {
 
 static void TestGlobalRetentionCallsAreCatalogOnly() {
 	Expect(lakemon::ExpireSnapshotsCall("lake", "7 days") ==
-	           "CALL ducklake_expire_snapshots('lake', older_than => now() - INTERVAL '7 days')",
+	           "CALL ducklake_expire_snapshots('lake', older_than => now()::TIMESTAMP - INTERVAL '7 days')",
 	       "expire snapshots is catalog-global");
 	Expect(lakemon::CleanupOldFilesCall("lake", "3 days") ==
-	           "CALL ducklake_cleanup_old_files('lake', older_than => now() - INTERVAL '3 days')",
+	           "CALL ducklake_cleanup_old_files('lake', older_than => now()::TIMESTAMP - INTERVAL '3 days')",
 	       "cleanup uses older_than when set");
 	Expect(lakemon::CleanupOldFilesCall("lake", "") == "CALL ducklake_cleanup_old_files('lake', cleanup_all => true)",
 	       "cleanup_all when delete interval unset");
